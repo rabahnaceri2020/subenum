@@ -1,0 +1,14 @@
+# Runtime artifacts
+install.log
+secrets.cfg
+.cache/
+Recon/
+
+# script.sh runtime artifacts
+domains.txt
+data/
+logs/
+
+# Expanded wordlists (generated from the vendored .gz or downloaded)
+resources/wordlists/subdomains.txt
+resources/wordlists/subdomains_big.txt
