@@ -233,7 +233,7 @@ if [[ $BASH_VERSION_NUM -lt 4 ]]; then
 fi
 
 # ------------------------------------------------------------------------------
-# Subdomain-enumeration tool set (and nothing else)
+# Tools used by subenum and its pipeline script (script.sh)
 # ------------------------------------------------------------------------------
 declare -A gotools=(
     ["subfinder"]="github.com/projectdiscovery/subfinder/v2/cmd/subfinder"
@@ -254,6 +254,9 @@ declare -A gotools=(
     ["anew"]="github.com/tomnomnom/anew"
     ["unfurl"]="github.com/tomnomnom/unfurl"
     ["inscope"]="github.com/tomnomnom/hacks/inscope"
+    ["notify"]="github.com/projectdiscovery/notify/cmd/notify"
+    ["katana"]="github.com/projectdiscovery/katana/cmd/katana"
+    ["nuclei"]="github.com/projectdiscovery/nuclei/v3/cmd/nuclei"
 )
 
 # uv-managed Python tools used by subdomain enumeration
@@ -435,6 +438,8 @@ function install_tools() {
 
     # Initialize tool configs on first run
     q command -v subfinder >/dev/null 2>&1 && q subfinder || true
+    mkdir -p "${HOME}/.config/notify"
+    q command -v notify >/dev/null 2>&1 && q notify || true
 
     # Installation summary
     printf "\n%b--- Tool Installation Summary ---%b\n" "$bblue" "$reset"
@@ -763,7 +768,7 @@ Options:
 Installs ONLY subdomain enumeration tools:
   Go:   subfinder, github-subdomains, gitlab-subdomains, asnmap, puredns, dnsx,
         dsieve, gotator, analyticsrelationships, csprecon, tlsx, hakip2host,
-        mapcidr, urlfinder, httpx, anew, unfurl, inscope
+        mapcidr, urlfinder, httpx, anew, unfurl, inscope, notify, katana, nuclei
   uv:   waymore, subwiz, dnsvalidator
   Repos: massdns (built), regulator (venv)
   Plus: resolvers, default + big subdomain wordlists

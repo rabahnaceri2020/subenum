@@ -32,6 +32,9 @@ NOTIFY_ID_HTTPX="httpx"
 NOTIFY_ID_TOKENS="tokens"
 NOTIFY_ID_BUGS="bugs"
 
+# Skip notify calls silently when the binary is not installed
+notify_file() { command -v notify >/dev/null 2>&1 && notify "$@"; }
+
 mkdir -p "$OUT_DIR" || { echo "ERROR: Cannot create output directory: $OUT_DIR" >&2; exit 1; }
 if [[ ! -f "$DOMAIN_LIST" ]]; then
     echo "ERROR: domain list not found: $DOMAIN_LIST" >&2
@@ -98,7 +101,7 @@ for domain in $(cat "$DOMAIN_LIST"); do
         awk '/^https?:\/\// {rest=substr($0, index($0, " ") + 1); if (!seen[rest]++) print $0}' \
             "$OUT_DIR/$domain.httpx" > "$OUT_DIR/$domain.httpx.tmp"
         mv "$OUT_DIR/$domain.httpx.tmp" "$OUT_DIR/$domain.httpx"
-        notify -data "$OUT_DIR/$domain.httpx" -id "$NOTIFY_ID_HTTPX" -bulk
+        notify_file -data "$OUT_DIR/$domain.httpx" -id "$NOTIFY_ID_HTTPX" -bulk
     fi
 
     # Run Katana
@@ -121,23 +124,25 @@ for domain in $(cat "$DOMAIN_LIST"); do
         elapsed=$(($(date +%s) - start_time))
         echo "Credentials scan completed - time took ${elapsed}s"
         if [[ -s "$OUT_DIR/$domain.tokens" ]]; then
-            notify -data "$OUT_DIR/$domain.tokens" -id "$NOTIFY_ID_TOKENS" -bulk
+            notify_file -data "$OUT_DIR/$domain.tokens" -id "$NOTIFY_ID_TOKENS" -bulk
         fi
     else
         echo "Skipping credentials scan (no JS files found)"
     fi
 
     # Run Full Nuclei Scan
-    if [[ -s "$OUT_DIR/$domain.httpx" ]]; then
+    if [[ ! -s "$OUT_DIR/$domain.httpx" ]]; then
+        echo "Skipping full nuclei scan (no httpx results)"
+    elif [[ ! -d "$NUCLEI_TEMPLATES" ]]; then
+        echo "WARNING: nuclei templates not found at $NUCLEI_TEMPLATES - skipping full nuclei scan"
+    else
         echo "Running full nuclei scan..."
         start_time=$(date +%s)
         cut -d " " -f 1 "$OUT_DIR/$domain.httpx" | nuclei -t "$NUCLEI_TEMPLATES" $NUCLEI_EXTRA_OPTS -si "$NUCLEI_STATS_INTERVAL" -etags "$NUCLEI_EXCLUDE_TAGS" -es "$NUCLEI_EXCLUDE_SEVERITY" -eid "$NUCLEI_EXCLUDE_IDS" | tee "$OUT_DIR/$domain.nuclei"
         elapsed=$(($(date +%s) - start_time))
         echo "Full nuclei scan completed - time took ${elapsed}s"
         if [[ -s "$OUT_DIR/$domain.nuclei" ]]; then
-            notify -data "$OUT_DIR/$domain.nuclei" -id "$NOTIFY_ID_BUGS" -bulk
+            notify_file -data "$OUT_DIR/$domain.nuclei" -id "$NOTIFY_ID_BUGS" -bulk
         fi
-    else
-        echo "Skipping full nuclei scan (no httpx results)"
     fi
 done
