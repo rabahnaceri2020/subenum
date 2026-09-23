@@ -64,6 +64,11 @@ VERBOSE=${VERBOSE:-false}
 LOGFILE=${LOGFILE:-"./install.log"}
 DRY_RUN=${DRY_RUN:-false}
 TOOLS_ONLY=${TOOLS_ONLY:-false}
+TEMPLATES_ONLY=${TEMPLATES_ONLY:-false}
+
+# nuclei-templates checkout (used by script.sh full nuclei scan)
+NUCLEI_TEMPLATES_DIR=${NUCLEI_TEMPLATES_DIR:-/opt/nuclei-templates}
+NUCLEI_TEMPLATES_REPO=${NUCLEI_TEMPLATES_REPO:-https://github.com/projectdiscovery/nuclei-templates}
 
 # Log all output (default: install.log in repo root)
 if [[ -n ${LOGFILE} ]]; then
@@ -711,8 +716,59 @@ function download_required_files() {
     printf "%bFinished downloading files.%b\n" "$bgreen" "$reset"
 }
 
+# Clone nuclei-templates to NUCLEI_TEMPLATES_DIR and install a nightly pull cron.
+# Idempotent: safe to run on every install.
+function setup_nuclei_templates() {
+    header "Nuclei templates"
+
+    if [[ $DRY_RUN == "true" ]]; then
+        printf "%s\n" "[DRY-RUN] ensure nuclei-templates at $NUCLEI_TEMPLATES_DIR (clone --depth 1 / pull origin main)"
+        printf "%s\n" "[DRY-RUN] ensure cron: 0 2 * * * /usr/bin/flock -n /var/lock/nuclei-templates.pull.lock /usr/bin/git -C $NUCLEI_TEMPLATES_DIR pull origin main > /var/log/nuclei-templates-pull.log 2>&1"
+        return 0
+    fi
+
+    if [[ -d "$NUCLEI_TEMPLATES_DIR/.git" ]]; then
+        printf "%bUpdating nuclei-templates at %s...%b\n" "$yellow" "$NUCLEI_TEMPLATES_DIR" "$reset"
+        $SUDO git -c safe.directory="$NUCLEI_TEMPLATES_DIR" -C "$NUCLEI_TEMPLATES_DIR" pull origin main &>/dev/null \
+            || msg_warn "[!] nuclei-templates pull failed (the nightly cron will retry)"
+    elif [[ -d "$NUCLEI_TEMPLATES_DIR" ]]; then
+        msg_warn "[!] $NUCLEI_TEMPLATES_DIR exists but is not a git repository; leaving it untouched"
+    else
+        printf "%bCloning nuclei-templates to %s...%b\n" "$yellow" "$NUCLEI_TEMPLATES_DIR" "$reset"
+        if ! $SUDO git clone --depth 1 "$NUCLEI_TEMPLATES_REPO" "$NUCLEI_TEMPLATES_DIR"; then
+            msg_err "[!] Failed to clone nuclei-templates from $NUCLEI_TEMPLATES_REPO"
+            return 1
+        fi
+        msg_ok "nuclei-templates installed at $NUCLEI_TEMPLATES_DIR"
+    fi
+
+    if [[ $IS_MAC == "True" ]] || ! command -v flock >/dev/null 2>&1 || ! command -v crontab >/dev/null 2>&1; then
+        msg_warn "[!] Skipping nuclei-templates cron (requires Linux flock + crontab)"
+        return 0
+    fi
+
+    local cron_cmd
+    cron_cmd="0 2 * * * /usr/bin/flock -n /var/lock/nuclei-templates.pull.lock /usr/bin/git -C $NUCLEI_TEMPLATES_DIR pull origin main > /var/log/nuclei-templates-pull.log 2>&1"
+
+    # The pull writes to $NUCLEI_TEMPLATES_DIR and /var/log, so install it for root.
+    local -a crontab_cmd=(crontab)
+    [[ "$(id -u)" -ne 0 ]] && crontab_cmd=($SUDO crontab)
+
+    if "${crontab_cmd[@]}" -l 2>/dev/null | grep -Fq "$NUCLEI_TEMPLATES_DIR"; then
+        msg_ok "nuclei-templates cron already installed"
+    else
+        ( "${crontab_cmd[@]}" -l 2>/dev/null; echo "$cron_cmd" ) | "${crontab_cmd[@]}" -
+        msg_ok "Installed nightly nuclei-templates pull cron (02:00)"
+    fi
+}
+
 function initial_setup() {
     banner
+
+    if [[ $TEMPLATES_ONLY == "true" ]]; then
+        setup_nuclei_templates
+        return
+    fi
 
     if [[ $TOOLS_ONLY == "true" ]]; then
         header "Tools-only mode"
@@ -725,6 +781,7 @@ function initial_setup() {
         q uv tool update-shell
         export PATH="${HOME}/.local/bin:${PATH}"
         install_tools
+        setup_nuclei_templates
         return
     fi
 
@@ -744,6 +801,7 @@ function initial_setup() {
 
     install_tools
     download_required_files
+    setup_nuclei_templates
 
     # Strip all Go binaries and copy to /usr/local/bin (files only)
     find "${GOPATH}/bin" -type f -perm -u+x -exec strip -s {} \; 2>/dev/null || true
@@ -761,6 +819,7 @@ Usage: $0 [OPTIONS]
 Options:
   -h, --help          Show this help and exit
   --tools             Only install/upgrade tools and exit
+  --templates         Only setup /opt/nuclei-templates + nightly pull cron and exit
   --verbose           Show detailed installer output
   --log <file>        Tee all installer output to <file>
   --dry-run           Print actions without executing changes
@@ -772,6 +831,8 @@ Installs ONLY subdomain enumeration tools:
   uv:   waymore, subwiz, dnsvalidator
   Repos: massdns (built), regulator (venv)
   Plus: resolvers, default + big subdomain wordlists
+  Templates: nuclei-templates cloned to /opt/nuclei-templates with a nightly
+             git pull cron (02:00, flock-protected)
 USAGE
     exit 0
 }
@@ -786,6 +847,10 @@ function handle_install_arguments() {
                 ;;
             --tools)
                 TOOLS_ONLY=true
+                shift
+                ;;
+            --templates)
+                TEMPLATES_ONLY=true
                 shift
                 ;;
             --verbose)
