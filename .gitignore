@@ -1,6 +1,5 @@
 # Runtime artifacts
 install.log
-secrets.cfg
 .cache/
 Recon/
 

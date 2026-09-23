@@ -242,9 +242,6 @@ fi
 # ------------------------------------------------------------------------------
 declare -A gotools=(
     ["subfinder"]="github.com/projectdiscovery/subfinder/v2/cmd/subfinder"
-    ["github-subdomains"]="github.com/gwen001/github-subdomains"
-    ["gitlab-subdomains"]="github.com/gwen001/gitlab-subdomains"
-    ["asnmap"]="github.com/projectdiscovery/asnmap/cmd/asnmap"
     ["puredns"]="github.com/d3mondev/puredns/v2"
     ["dnsx"]="github.com/projectdiscovery/dnsx/cmd/dnsx"
     ["dsieve"]="github.com/trickest/dsieve"
@@ -679,8 +676,6 @@ function download_required_files() {
 
     mkdir -p "$dir"
     mkdir -p "$WORDLISTS_DIR"
-    touch "${dir}/.github_tokens"
-    touch "${dir}/.gitlab_tokens"
 
     # Resolvers
     if [[ ! -s "$resolvers" ]] || [[ -n "$(find "$resolvers" -mtime +1 -print 2>/dev/null)" ]]; then
@@ -711,8 +706,6 @@ function download_required_files() {
             || msg_err "Failed to download big subdomains wordlist"
     fi
 
-    printf "\n%bReminder:%b for GitHub/GitLab passive sources, set tokens in:\n" "$yellow" "$reset"
-    printf "  %s/.github_tokens and %s/.gitlab_tokens\n" "$dir" "$dir"
     printf "%bFinished downloading files.%b\n" "$bgreen" "$reset"
 }
 
@@ -825,7 +818,7 @@ Options:
   --dry-run           Print actions without executing changes
 
 Installs ONLY subdomain enumeration tools:
-  Go:   subfinder, github-subdomains, gitlab-subdomains, asnmap, puredns, dnsx,
+  Go:   subfinder, puredns, dnsx,
         dsieve, gotator, analyticsrelationships, csprecon, tlsx, hakip2host,
         mapcidr, urlfinder, httpx, anew, unfurl, inscope, notify, katana, nuclei
   uv:   waymore, subwiz, dnsvalidator

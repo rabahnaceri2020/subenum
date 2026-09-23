@@ -115,9 +115,9 @@ function help() {
     printf "   -h, --help                  Show this help\n"
     printf " \n"
     printf " %bMETHODS (for --only)%b\n" "${bblue:-}" "${reset:-}"
-    printf "   sub_asn, sub_passive, sub_crt, sub_active, sub_tls, sub_noerror, sub_srv,\n"
-    printf "   sub_dns, sub_ptr_cidrs, sub_brute, sub_permut, sub_regex_permut,\n"
-    printf "   sub_ia_permut, sub_recursive_passive, sub_recursive_brute, sub_scraping,\n"
+    printf "   sub_passive, sub_crt, sub_active, sub_tls, sub_noerror, sub_srv, sub_dns,\n"
+    printf "   sub_brute, sub_permut, sub_regex_permut, sub_ia_permut,\n"
+    printf "   sub_recursive_passive, sub_recursive_brute, sub_scraping,\n"
     printf "   sub_analytics, sub_ns_delegation, zonetransfer\n"
     printf " \n"
     printf " %bOUTPUT%b\n" "${bblue:-}" "${reset:-}"
@@ -369,9 +369,6 @@ SCRIPTPATH="$(
     exit 1
 }
 
-# Source optional secrets file (gitignored, for API keys and tokens)
-[[ -f "${SCRIPTPATH}/secrets.cfg" ]] && . "${SCRIPTPATH}/secrets.cfg"
-
 if [[ -n "$CUSTOM_CONFIG" ]] && [[ -s $CUSTOM_CONFIG ]]; then
     . "${CUSTOM_CONFIG}" || {
         _print_error "Error importing custom config"
@@ -444,7 +441,6 @@ ui_init
 apply_only_selection() {
     [[ -z "$ONLY_METHODS" ]] && return 0
     declare -A only_map=(
-        [sub_asn]=ASN_ENUM
         [sub_passive]=SUBPASSIVE
         [sub_crt]=SUBCRT
         [sub_noerror]=SUBNOERROR
@@ -458,7 +454,6 @@ apply_only_selection() {
         [sub_scraping]=SUBSCRAPING
         [sub_analytics]=SUBANALYTICS
         [sub_ns_delegation]=NS_DELEGATION
-        [sub_ptr_cidrs]=PTR_SWEEP
         [zonetransfer]=ZONETRANSFER
     )
     local flag m

@@ -5,15 +5,13 @@
 # discover subdomains (no web probing, no screenshots, no OSINT, no takeover/S3).
 #
 # Methods:
-#   sub_asn               ASN/CIDR discovery (asnmap)
-#   sub_passive           Passive sources (subfinder, ip.thc.org, github/gitlab)
+#   sub_passive           Passive sources (subfinder, ip.thc.org)
 #   sub_crt               Certificate transparency (crt.name, bgp.he.net)
 #   sub_active            DNS resolution of passive results (puredns/dnsx)
 #   sub_tls               TLS certificate SAN/CN grabbing (tlsx)
 #   sub_noerror           DNS NOERROR brute force (dnsx)
 #   sub_srv               SRV record enumeration (dnsx)
 #   sub_dns               DNS recon + PTR pivots (dnsx, hakip2host)
-#   sub_ptr_cidrs         PTR sweep over ASN CIDRs (mapcidr + dnsx)
 #   sub_brute             DNS brute force (puredns/dnsx + wordlist)
 #   sub_scraping          Subdomain extraction from web crawling (urlfinder, waymore, httpx, csprecon)
 #   sub_analytics         Analytics relationship pivots (analyticsrelationships)
@@ -231,9 +229,6 @@ _subdomains_enumerate() {
         # Parallel execution using lib/parallel.sh
         [[ "${OUTPUT_VERBOSITY:-1}" -ge 2 ]] && printf "%b[*] Running subdomain enumeration in parallel mode%b\n" "$bblue" "$reset"
 
-        # Phase 0: ASN enumeration (independent)
-        sub_asn
-
         # Phase 1: Passive sources (all can run in parallel)
         parallel_funcs "${PAR_SUB_PASSIVE_GROUP_SIZE:-4}" sub_passive sub_crt
         local sub_g1_rc=$?
@@ -281,7 +276,7 @@ _subdomains_enumerate() {
         done
 
         # Phase 4: Dependent active enrichment (runs after sub_active is ready)
-        parallel_funcs "${PAR_SUB_DEP_ACTIVE_GROUP_SIZE:-3}" sub_noerror sub_dns sub_srv sub_ptr_cidrs
+        parallel_funcs "${PAR_SUB_DEP_ACTIVE_GROUP_SIZE:-3}" sub_noerror sub_dns sub_srv
         local sub_g4_rc=$?
         if ((sub_g4_rc > 0)); then
             if [[ "${CONTINUE_ON_TOOL_ERROR:-true}" == "true" ]]; then
@@ -310,7 +305,6 @@ _subdomains_enumerate() {
         sub_scraping
     else
         # Sequential execution
-        sub_asn
         sub_passive
         sub_crt
         sub_active
@@ -324,7 +318,6 @@ _subdomains_enumerate() {
         sub_recursive_passive
         sub_recursive_brute
         sub_dns
-        sub_ptr_cidrs
         sub_scraping
         sub_analytics
         sub_ns_delegation
@@ -388,87 +381,6 @@ function subdomains_full() {
     _subdomains_finalize
 }
 
-function sub_asn() {
-    ensure_dirs .tmp subdomains
-
-    if should_run "ASN_ENUM"; then
-        start_subfunc "${FUNCNAME[0]}" "Running: ASN Enumeration"
-
-        # Discover ASN/CIDR metadata for the current target domain.
-        local asn_json pdcp_key asn_rc asn_status
-        if command -v asnmap &>/dev/null; then
-            asn_json=".tmp/asnmap_${domain}.json"
-            pdcp_key="${PDCP_API_KEY:-}"
-            asn_rc=0
-            asn_status="OK"
-            : >"$asn_json"
-
-            if [[ -z "${pdcp_key//[[:space:]]/}" ]]; then
-                _print_msg WARN "ASN_ENUM enabled but PDCP_API_KEY is not set. Skipping asnmap ASN enumeration."
-                log_note "ASN_ENUM enabled but PDCP_API_KEY is not set. Skipping asnmap ASN enumeration." "${FUNCNAME[0]}" "${LINENO}"
-                asn_status="WARN"
-            else
-                if [[ -n ${TIMEOUT_CMD:-} ]]; then
-                    run_command "$TIMEOUT_CMD" -k 10s 120s asnmap -d "$domain" -silent -j 2>>"$LOGFILE" >"$asn_json"
-                    asn_rc=$?
-                elif run_command asnmap -d "$domain" -silent -j 2>>"$LOGFILE" >"$asn_json"; then
-                    asn_rc=0
-                else
-                    asn_rc=$?
-                fi
-
-                if [[ "${DRY_RUN:-false}" == "true" ]]; then
-                    _print_msg INFO "Dry-run: asnmap execution recorded, ASN parsing skipped."
-                    asn_status="SKIP"
-                elif [[ $asn_rc -eq 0 ]] && jq -e '((.cidr // "") | tostring | length) > 0 or ((.as_number // "") | tostring | length) > 0' "$asn_json" >/dev/null 2>&1; then
-                    jq -r '.cidr // empty' "$asn_json" | sed '/^$/d' | sort -u >.tmp/asn_cidrs.txt
-                    jq -r '.as_number // empty' "$asn_json" | sed '/^$/d' | sort -u >.tmp/asn_numbers.txt
-
-                    local cidr_count asn_count
-                    cidr_count=$(wc -l <.tmp/asn_cidrs.txt 2>/dev/null | tr -d ' ')
-                    asn_count=$(wc -l <.tmp/asn_numbers.txt 2>/dev/null | tr -d ' ')
-
-                    _print_msg INFO "ASN enumeration found ${asn_count:-0} ASNs and ${cidr_count:-0} CIDR ranges"
-
-                    # If asnmap yields discovered domains, feed them into subdomain pipeline.
-                    jq -r '.domains[]? // empty' "$asn_json" \
-                        | sed '/^$/d' \
-                        | grep -E '^([a-zA-Z0-9\.\-]+\.)+[a-zA-Z]{1,}$' \
-                        | grep -E "$DOMAIN_MATCH_REGEX" \
-                        | sort -u \
-                        | anew -q .tmp/subs_no_resolved.txt || true
-                    if [[ -s .tmp/subs_no_resolved.txt ]]; then
-                        _print_msg INFO "ASN sources added $(wc -l <.tmp/subs_no_resolved.txt | tr -d ' ') in-scope domains"
-                    fi
-                elif [[ $asn_rc -eq 0 ]]; then
-                    # No ASN data for this target: continue silently without warning.
-                    asn_status="OK"
-                elif [[ $asn_rc -eq 124 || $asn_rc -eq 137 ]]; then
-                    _print_msg WARN "asnmap timed out after 120s. Skipping ASN output for ${domain}."
-                    log_note "asnmap timed out after 120s. Skipping ASN output for ${domain}." "${FUNCNAME[0]}" "${LINENO}"
-                    asn_status="WARN"
-                else
-                    _print_msg FAIL "asnmap failed (exit ${asn_rc:-1}). Skipping ASN output for ${domain}."
-                    log_note "asnmap failed (exit ${asn_rc:-1}). Skipping ASN output for ${domain}." "${FUNCNAME[0]}" "${LINENO}"
-                    asn_status="FAIL"
-                fi
-            fi
-        else
-            _print_msg WARN "asnmap not installed, skipping ASN enumeration"
-            log_note "asnmap not installed, skipping ASN enumeration" "${FUNCNAME[0]}" "${LINENO}"
-            asn_status="WARN"
-        fi
-
-        end_subfunc "${FUNCNAME[0]}" "${FUNCNAME[0]}" "${asn_status:-OK}"
-    else
-        if [[ $ASN_ENUM == false ]]; then
-            skip_notification "disabled"
-        else
-            skip_notification "processed"
-        fi
-    fi
-}
-
 function sub_passive() {
 
     ensure_dirs .tmp subdomains
@@ -480,25 +392,9 @@ function sub_passive() {
         run_command subfinder -all -d "$domain" -max-time "$SUBFINDER_ENUM_TIMEOUT" -silent -o .tmp/subfinder_psub.txt 2>>"$LOGFILE" >/dev/null
         run_command curl -s https://ip.thc.org/sb/$domain | grep -v ";;" | anew -q .tmp/subfinder_psub.txt 2>>"$LOGFILE" >/dev/null
 
-        # Run github-subdomains if GITHUB_TOKENS is set and file is not empty
-        if [[ -s $GITHUB_TOKENS ]]; then
-            if [[ $DEEP == true ]]; then
-                run_command github-subdomains -d "$domain" -t "$GITHUB_TOKENS" -o .tmp/github_subdomains_psub.txt 2>>"$LOGFILE" >/dev/null
-            else
-                run_command github-subdomains -d "$domain" -k -q -t "$GITHUB_TOKENS" -o .tmp/github_subdomains_psub.txt 2>>"$LOGFILE" >/dev/null
-            fi
-        fi
-
-        # Run gitlab-subdomains if GITLAB_TOKENS is set and file is not empty
-        if [[ -s $GITLAB_TOKENS ]]; then
-            run_command gitlab-subdomains -d "$domain" -t "$GITLAB_TOKENS" 2>>"$LOGFILE" | tee .tmp/gitlab_subdomains_psub.txt >/dev/null
-        fi
-
         # Check if INSCOPE is true and run check_inscope
         if [[ $INSCOPE == true ]]; then
             check_inscope .tmp/subfinder_psub.txt 2>>"$LOGFILE" >/dev/null
-            check_inscope .tmp/github_subdomains_psub.txt 2>>"$LOGFILE" >/dev/null
-            check_inscope .tmp/gitlab_subdomains_psub.txt 2>>"$LOGFILE" >/dev/null
         fi
 
         # Combine results and count new lines
@@ -900,78 +796,6 @@ function sub_dns() {
         end_subfunc "${NUMOFLINES} new subs (dns resolution)" "${FUNCNAME[0]}"
     else
         skip_notification "processed"
-    fi
-}
-
-function sub_ptr_cidrs() {
-    ensure_dirs .tmp subdomains
-
-    if { [[ ! -f "$called_fn_dir/.${FUNCNAME[0]}" ]] || [[ $DIFF == true ]]; } && [[ ${PTR_SWEEP:-false} == true ]]; then
-        start_subfunc "${FUNCNAME[0]}" "Running: PTR Sweep over ASN CIDRs"
-
-        if [[ ! -s ".tmp/asn_cidrs.txt" ]]; then
-            _print_msg WARN "No ASN CIDRs available (.tmp/asn_cidrs.txt missing); skipping PTR sweep."
-            end_subfunc "0 new subs (ptr sweep)" "${FUNCNAME[0]}" "SKIP"
-            return
-        fi
-
-        if ! command -v mapcidr &>/dev/null; then
-            _print_msg WARN "mapcidr not found; skipping CIDR expansion for PTR sweep."
-            end_subfunc "0 new subs (ptr sweep)" "${FUNCNAME[0]}" "SKIP"
-            return
-        fi
-
-        # Expand CIDRs to IPs with safety limit
-        local max_ips="${PTR_SWEEP_MAX_IPS:-50000}"
-        : >.tmp/ptr_ips_expanded.txt
-        run_command mapcidr -silent <.tmp/asn_cidrs.txt 2>>"$LOGFILE" \
-            | head -n "$max_ips" >.tmp/ptr_ips_expanded.txt || true
-
-        local expanded_count
-        expanded_count=$(wc -l <.tmp/ptr_ips_expanded.txt 2>/dev/null | tr -d ' ')
-        if [[ "${expanded_count:-0}" -eq 0 ]]; then
-            end_subfunc "0 new subs (ptr sweep - empty expansion)" "${FUNCNAME[0]}" "SKIP"
-            return
-        fi
-        _print_msg INFO "PTR sweep: scanning ${expanded_count} IPs from ASN CIDRs (limit: ${max_ips})"
-
-        # PTR lookups via dnsx
-        : >.tmp/ptr_results_raw.txt
-        run_command dnsx -ptr -resp-only -silent -retry 2 \
-            -t "${DNSX_THREADS:-100}" -rl "${DNSX_RATE_LIMIT:-500}" \
-            -r "$resolvers_trusted" \
-            <.tmp/ptr_ips_expanded.txt >.tmp/ptr_results_raw.txt 2>>"$LOGFILE" || true
-
-        # Filter in-scope, save raw + merged
-        : >.tmp/ptr_inscope.txt
-        if [[ -s ".tmp/ptr_results_raw.txt" ]]; then
-            sed -e 's/\.$//' -e '/^$/d' .tmp/ptr_results_raw.txt \
-                | grep -E '^([a-zA-Z0-9][-a-zA-Z0-9]*\.)+[a-zA-Z]{2,}$' \
-                | sort -u >subdomains/ptr_pivots.txt || true
-
-            grep -E "$DOMAIN_MATCH_REGEX" subdomains/ptr_pivots.txt \
-                >.tmp/ptr_inscope.txt 2>/dev/null || true
-        fi
-
-        if [[ $INSCOPE == true ]] && [[ -s ".tmp/ptr_inscope.txt" ]]; then
-            if ! check_inscope .tmp/ptr_inscope.txt 2>>"$LOGFILE" >/dev/null; then
-                print_warnf "check_inscope command failed."
-            fi
-        fi
-
-        NUMOFLINES=0
-        if [[ -s ".tmp/ptr_inscope.txt" ]]; then
-            NUMOFLINES=$(anew subdomains/subdomains.txt <.tmp/ptr_inscope.txt | sed '/^$/d' | wc -l | tr -d ' ' || true)
-            [[ "$NUMOFLINES" =~ ^[0-9]+$ ]] || NUMOFLINES=0
-        fi
-
-        end_subfunc "${NUMOFLINES} new subs (ptr sweep)" "${FUNCNAME[0]}"
-    else
-        if [[ ${PTR_SWEEP:-false} == false ]]; then
-            skip_notification "disabled"
-        else
-            skip_notification "processed"
-        fi
     fi
 }
 
