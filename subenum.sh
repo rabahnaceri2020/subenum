@@ -117,8 +117,8 @@ function help() {
     printf " %bMETHODS (for --only)%b\n" "${bblue:-}" "${reset:-}"
     printf "   sub_passive, sub_crt, sub_active, sub_tls, sub_noerror, sub_srv, sub_dns,\n"
     printf "   sub_brute, sub_permut, sub_regex_permut, sub_ia_permut,\n"
-    printf "   sub_recursive_passive, sub_recursive_brute, sub_scraping,\n"
-    printf "   sub_analytics, sub_ns_delegation, zonetransfer\n"
+    printf "   sub_recursive_passive, sub_recursive_brute,\n"
+    printf "   sub_ns_delegation, zonetransfer\n"
     printf " \n"
     printf " %bOUTPUT%b\n" "${bblue:-}" "${reset:-}"
     printf "   <output-root>/<domain>/subdomains/subdomains.txt      All discovered subdomains\n"
@@ -416,7 +416,6 @@ fi
 
 if [[ -n $rate_limit ]]; then
     DNSX_RATE_LIMIT=$rate_limit
-    HTTPX_RATELIMIT=$rate_limit
 fi
 
 # Root/sudo detection (used by the installer; kept for parity)
@@ -451,8 +450,6 @@ apply_only_selection() {
         [sub_ia_permut]=SUBIAPERMUTE
         [sub_recursive_passive]=SUB_RECURSIVE_PASSIVE
         [sub_recursive_brute]=SUB_RECURSIVE_BRUTE
-        [sub_scraping]=SUBSCRAPING
-        [sub_analytics]=SUBANALYTICS
         [sub_ns_delegation]=NS_DELEGATION
         [zonetransfer]=ZONETRANSFER
     )

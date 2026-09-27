@@ -825,23 +825,6 @@ parallel_active_enum() {
     parallel_funcs "${PAR_SUB_DEP_ACTIVE_GROUP_SIZE:-3}" "${funcs[@]}"
 }
 
-# Run post-active subdomain enumeration in parallel
-# Usage: parallel_postactive_enum
-# Runs: sub_tls, sub_analytics (require resolved subdomains from sub_active)
-parallel_postactive_enum() {
-    local funcs=(
-        "sub_tls"
-        "sub_analytics"
-    )
-
-    if [[ "${OUTPUT_VERBOSITY:-1}" -ge 2 ]]; then
-        printf "%b[*] Running post-active enumeration in parallel (%d functions)%b\n" \
-            "${bblue:-}" "${#funcs[@]}" "${reset:-}"
-    fi
-
-    parallel_funcs "${PAR_SUB_POST_ACTIVE_GROUP_SIZE:-2}" "${funcs[@]}"
-}
-
 # Run brute force enumeration sequentially (resource usage and shared artifacts)
 # Usage: parallel_brute_enum
 parallel_brute_enum() {

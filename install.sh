@@ -246,12 +246,9 @@ declare -A gotools=(
     ["dnsx"]="github.com/projectdiscovery/dnsx/cmd/dnsx"
     ["dsieve"]="github.com/trickest/dsieve"
     ["gotator"]="github.com/Josue87/gotator"
-    ["analyticsrelationships"]="github.com/Josue87/analyticsrelationships"
-    ["csprecon"]="github.com/edoardottt/csprecon/cmd/csprecon"
     ["tlsx"]="github.com/projectdiscovery/tlsx/cmd/tlsx"
     ["hakip2host"]="github.com/hakluke/hakip2host"
     ["mapcidr"]="github.com/projectdiscovery/mapcidr/cmd/mapcidr"
-    ["urlfinder"]="github.com/projectdiscovery/urlfinder/cmd/urlfinder"
     ["httpx"]="github.com/projectdiscovery/httpx/cmd/httpx"
     ["anew"]="github.com/tomnomnom/anew"
     ["unfurl"]="github.com/tomnomnom/unfurl"
@@ -263,7 +260,6 @@ declare -A gotools=(
 
 # uv-managed Python tools used by subdomain enumeration
 declare -A pipxtools=(
-    ["waymore"]="xnl-h4ck3r/waymore"
     ["subwiz"]="hadriansecurity/subwiz"
     ["dnsvalidator"]="vortexau/dnsvalidator"
 )
@@ -684,16 +680,16 @@ function download_required_files() {
         retry 3 3 q_to 120 wget -q -O "$resolvers_trusted" "$resolvers_trusted_url" || msg_err "Failed to download trusted resolvers"
     fi
 
-    # Default brute-force wordlist: expand the vendored .gz, or download it if absent.
+    # Default brute-force wordlist (n0kovo small, ~200k entries): expand the
+    # vendored .gz, or download it if absent.
     if [[ ! -s "${WORDLISTS_DIR}/subdomains.txt" ]]; then
         if [[ -s "${WORDLISTS_DIR}/subdomains.txt.gz" ]]; then
             printf "%bExpanding subdomains wordlist...%b\n" "$yellow" "$reset"
             gzip -dc "${WORDLISTS_DIR}/subdomains.txt.gz" >"${WORDLISTS_DIR}/subdomains.txt"
         else
             printf "%bFetching default subdomains wordlist...%b\n" "$yellow" "$reset"
-            retry 3 3 q_to 300 wget -q -O "${WORDLISTS_DIR}/subdomains.txt.gz" \
-                "https://raw.githubusercontent.com/six2dez/reconftw/main/data/wordlists/subdomains.txt.gz" \
-                && gzip -dc "${WORDLISTS_DIR}/subdomains.txt.gz" >"${WORDLISTS_DIR}/subdomains.txt" \
+            retry 3 3 q_to 300 wget -q -O "${WORDLISTS_DIR}/subdomains.txt" \
+                "https://raw.githubusercontent.com/n0kovo/n0kovo_subdomains/main/n0kovo_subdomains_small.txt" \
                 || msg_err "Failed to download default subdomains wordlist"
         fi
     fi
@@ -819,9 +815,9 @@ Options:
 
 Installs ONLY subdomain enumeration tools:
   Go:   subfinder, puredns, dnsx,
-        dsieve, gotator, analyticsrelationships, csprecon, tlsx, hakip2host,
-        mapcidr, urlfinder, httpx, anew, unfurl, inscope, notify, katana, nuclei
-  uv:   waymore, subwiz, dnsvalidator
+        dsieve, gotator, tlsx, hakip2host,
+        mapcidr, httpx, anew, unfurl, inscope, notify, katana, nuclei
+  uv:   subwiz, dnsvalidator
   Repos: massdns (built), regulator (venv)
   Plus: resolvers, default + big subdomain wordlists
   Templates: nuclei-templates cloned to /opt/nuclei-templates with a nightly

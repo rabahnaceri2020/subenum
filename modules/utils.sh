@@ -81,7 +81,7 @@ function validate_config() {
     local errors=0
 
     # Validate numeric thread/rate variables
-    for var in DNSX_THREADS DNSX_RATE_LIMIT TLSX_THREADS PERMUTATIONS_SHORT_THRESHOLD DNSTAKE_THREADS; do
+    for var in DNSX_THREADS DNSX_RATE_LIMIT TLSX_THREADS PERMUTATIONS_SHORT_THRESHOLD; do
         if [[ -n "${!var:-}" && ! "${!var}" =~ ^[0-9]+$ ]]; then
             print_errorf "%s must be numeric, got: %s" "$var" "${!var}"
             errors=$((errors + 1))

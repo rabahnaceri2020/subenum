@@ -149,13 +149,9 @@ function tools_installed() {
         ["dnsx"]="dnsx"
         ["dsieve"]="dsieve"
         ["gotator"]="gotator"
-        ["analyticsrelationships"]="analyticsrelationships"
-        ["csprecon"]="csprecon"
         ["tlsx"]="tlsx"
         ["hakip2host"]="hakip2host"
         ["mapcidr"]="mapcidr"
-        ["urlfinder"]="urlfinder"
-        ["httpx"]="httpx"
     )
     # massdns is only required by the puredns resolver path.
     if [[ "${DNS_RESOLVER_SELECTED:-}" == "puredns" ]] || [[ "${DNS_RESOLVER:-auto}" == "puredns" ]]; then
@@ -538,7 +534,7 @@ function check_inscope() {
 function remove_big_files() {
     rm -rf .tmp/gotator*.txt 2>>"${LOGFILE}"
     rm -rf .tmp/brute_recursive_wordlist.txt 2>>"$LOGFILE"
-    rm -rf .tmp/subs_no_resolved.txt .tmp/subdomains_dns.txt .tmp/scrap_subs.txt .tmp/analytics_subs_clean.txt .tmp/passive_recursive.txt .tmp/gotator1_recursive.txt .tmp/gotator2_recursive.txt 2>>"$LOGFILE"
+    rm -rf .tmp/subs_no_resolved.txt .tmp/subdomains_dns.txt .tmp/passive_recursive.txt .tmp/gotator1_recursive.txt .tmp/gotator2_recursive.txt 2>>"$LOGFILE"
     find .tmp -type f -size +200M -exec rm -f {} + 2>>"$LOGFILE"
 }
 

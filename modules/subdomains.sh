@@ -13,8 +13,6 @@
 #   sub_srv               SRV record enumeration (dnsx)
 #   sub_dns               DNS recon + PTR pivots (dnsx, hakip2host)
 #   sub_brute             DNS brute force (puredns/dnsx + wordlist)
-#   sub_scraping          Subdomain extraction from web crawling (urlfinder, waymore, httpx, csprecon)
-#   sub_analytics         Analytics relationship pivots (analyticsrelationships)
 #   sub_ns_delegation     NS delegation + AXFR on delegated zones
 #   sub_permut            DNS permutations (gotator, 2 rounds)
 #   sub_regex_permut      Permutations by regex analysis (regulator)
@@ -288,7 +286,7 @@ _subdomains_enumerate() {
         fi
 
         # Phase 5: Post-active analysis (depends on active/enrichment results)
-        parallel_funcs "${PAR_SUB_POST_ACTIVE_GROUP_SIZE:-2}" sub_tls sub_analytics sub_ns_delegation
+        parallel_funcs "${PAR_SUB_POST_ACTIVE_GROUP_SIZE:-2}" sub_tls sub_ns_delegation
         local sub_g5_rc=$?
         if ((sub_g5_rc > 0)); then
             if [[ "${CONTINUE_ON_TOOL_ERROR:-true}" == "true" ]]; then
@@ -299,10 +297,9 @@ _subdomains_enumerate() {
             fi
         fi
 
-        # Phase 6: Recursive and scraping (sequential - depends on previous results)
+        # Phase 6: Recursive (sequential - depends on previous results)
         sub_recursive_passive
         sub_recursive_brute
-        sub_scraping
     else
         # Sequential execution
         sub_passive
@@ -318,8 +315,6 @@ _subdomains_enumerate() {
         sub_recursive_passive
         sub_recursive_brute
         sub_dns
-        sub_scraping
-        sub_analytics
         sub_ns_delegation
     fi
 }
@@ -853,204 +848,6 @@ function sub_brute() {
         fi
     fi
 
-}
-
-function sub_scraping() {
-
-    # Create necessary directories
-    if ! ensure_dirs .tmp subdomains; then
-        return 1
-    fi
-
-    # Check if the function should run
-    if { [[ ! -f "$called_fn_dir/.${FUNCNAME[0]}" ]] || [[ $DIFF == true ]]; } && [[ $SUBSCRAPING == true ]]; then
-        start_subfunc "${FUNCNAME[0]}" "Running: Source code scraping subdomain search"
-
-        # Initialize scrap_subs.txt
-        if ! touch .tmp/scrap_subs.txt; then
-            print_warnf "Failed to create .tmp/scrap_subs.txt."
-            return 1
-        fi
-
-        # Check if subdomains.txt exists and is not empty
-        if [[ -s "subdomains/subdomains.txt" ]]; then
-
-            subdomains_count=$(wc -l <"subdomains/subdomains.txt")
-            if [[ $subdomains_count -le $DEEP_LIMIT ]] || [[ $DEEP == true ]]; then
-
-                run_command urlfinder -d "$domain" -all -o .tmp/url_extract_tmp.txt 2>>"$LOGFILE" >/dev/null
-
-                if [[ -s ".tmp/url_extract_tmp.txt" ]]; then
-                    # Anchored scope filter (filter_in_scope_urls) replaces grep -a "$domain".
-                    cat .tmp/url_extract_tmp.txt | grep -aEo 'https?://[^ ]+' \
-                        | filter_in_scope_urls "$domain" \
-                        | sed "s/^\*\.//" | unfurl -u domains 2>>"$LOGFILE" | anew -q .tmp/scrap_subs.txt || true
-                fi
-
-                if command -v waymore &>/dev/null; then
-                    print_notice RUN "sub_scraping" "collecting passive URLs"
-                    if ! run_command "$TIMEOUT_CMD" "${WAYMORE_TIMEOUT:-30m}" waymore -i "$domain" -mode U -oU .tmp/waymore_urls_subs.txt 2>>"$LOGFILE" >/dev/null; then
-                        log_note "sub_scraping: waymore failed or timed out; continuing" "${FUNCNAME[0]}" "${LINENO}"
-                    fi
-                    if [[ -s ".tmp/waymore_urls_subs.txt" ]]; then
-                        cat .tmp/waymore_urls_subs.txt | grep -aEo 'https?://[^ ]+' \
-                            | filter_in_scope_urls "$domain" \
-                            | sed "s/^\*\.//" | unfurl -u domains 2>>"$LOGFILE" | anew -q .tmp/scrap_subs.txt || true
-                    fi
-                else
-                    log_note "sub_scraping: waymore not found; skipping waymore passive collection" "${FUNCNAME[0]}" "${LINENO}"
-                fi
-
-                # Run httpx to gather web info
-                run_command httpx -follow-host-redirects -status-code -threads "$HTTPX_THREADS" -rl "$HTTPX_RATELIMIT" \
-                    -timeout "$HTTPX_TIMEOUT" -silent -retries 2 -title -web-server -tech-detect -location \
-                    -no-color -json -o .tmp/web_full_info1.txt \
-                    <subdomains/subdomains.txt 2>>"$LOGFILE" >/dev/null
-
-                if [[ -s ".tmp/web_full_info1.txt" ]]; then
-                    cat .tmp/web_full_info1.txt | jq -r 'try .url' 2>/dev/null \
-                        | grep -aEo 'https?://[^ ]+' \
-                        | filter_in_scope_urls "$domain" \
-                        | sed "s/^\*\.//" \
-                        | anew .tmp/probed_tmp_scrap.txt \
-                        | unfurl -u domains 2>>"$LOGFILE" \
-                        | anew -q .tmp/scrap_subs.txt || true
-                fi
-
-                if [[ -s ".tmp/probed_tmp_scrap.txt" ]]; then
-                    # csprecon output is hostnames, not URLs -> filter_in_scope_hosts
-                    cat .tmp/probed_tmp_scrap.txt | run_command csprecon -s | sed "s/^\*\.//" | filter_in_scope_hosts "$domain" | sort -u \
-                        | unfurl -u domains 2>>"$LOGFILE" | anew -q .tmp/scrap_subs.txt || true
-                fi
-
-                if [[ -s ".tmp/scrap_subs.txt" ]]; then
-                    _resolve_domains .tmp/scrap_subs.txt .tmp/scrap_subs_resolved.txt
-                fi
-
-                if [[ $INSCOPE == true ]] && [[ -s ".tmp/scrap_subs_resolved.txt" ]]; then
-                    if ! check_inscope .tmp/scrap_subs_resolved.txt 2>>"$LOGFILE" >/dev/null; then
-                        print_warnf "check_inscope command failed."
-                    fi
-                fi
-
-                if [[ -s ".tmp/scrap_subs_resolved.txt" ]]; then
-                    if ! NUMOFLINES=$(cat .tmp/scrap_subs_resolved.txt 2>>"$LOGFILE" \
-                        | grep -aE "$DOMAIN_MATCH_REGEX" \
-                        | grep -Ea '^([a-zA-Z0-9\.\-]+\.)+[a-zA-Z]{1,}$' \
-                        | anew subdomains/subdomains.txt \
-                        | tee .tmp/diff_scrap.txt \
-                        | sed '/^$/d' | wc -l); then
-                        NUMOFLINES=0
-                    fi
-                else
-                    NUMOFLINES=0
-                fi
-
-                if [[ -s ".tmp/diff_scrap.txt" ]]; then
-                    run_command httpx -follow-host-redirects -random-agent -status-code -threads "$HTTPX_THREADS" \
-                        -rl "$HTTPX_RATELIMIT" -timeout "$HTTPX_TIMEOUT" -silent -retries 2 -title -web-server \
-                        -tech-detect -location -no-color -json -o .tmp/web_full_info3.txt \
-                        <.tmp/diff_scrap.txt 2>>"$LOGFILE" >/dev/null
-
-                    if [[ -s ".tmp/web_full_info3.txt" ]]; then
-                        cat .tmp/web_full_info3.txt | jq -r 'try .url' 2>/dev/null \
-                            | grep -aEo 'https?://[^ ]+' \
-                            | filter_in_scope_urls "$domain" \
-                            | sed "s/^\*\.//" \
-                            | anew .tmp/probed_tmp_scrap.txt \
-                            | unfurl -u domains 2>>"$LOGFILE" \
-                            | anew -q .tmp/scrap_subs.txt || true
-                    fi
-                fi
-
-                local webinfo_files=()
-                [[ -s ".tmp/web_full_info1.txt" ]] && webinfo_files+=(".tmp/web_full_info1.txt")
-                [[ -s ".tmp/web_full_info2.txt" ]] && webinfo_files+=(".tmp/web_full_info2.txt")
-                [[ -s ".tmp/web_full_info3.txt" ]] && webinfo_files+=(".tmp/web_full_info3.txt")
-
-                if [[ ${#webinfo_files[@]} -gt 0 ]]; then
-                    # Keep .tmp/web_full_info.txt as JSONL (1 JSON object per line) for later merges.
-                    : >.tmp/web_full_info.txt
-                    if ! cat "${webinfo_files[@]}" 2>>"$LOGFILE" \
-                        | jq -cs 'unique_by(.input)[]' 2>>"$LOGFILE" >.tmp/web_full_info.txt; then
-                        : >.tmp/web_full_info.txt
-                        log_note "sub_scraping: failed to merge web_full_info JSON; continuing without cache" "${FUNCNAME[0]}" "${LINENO}"
-                    fi
-                else
-                    log_note "sub_scraping: web_full_info files missing/empty; skipping merge" "${FUNCNAME[0]}" "${LINENO}"
-                fi
-
-                end_subfunc "${NUMOFLINES} new subs (code scraping)" "${FUNCNAME[0]}"
-
-            else
-                end_subfunc "Skipping Subdomains Web Scraping: Too Many Subdomains" "${FUNCNAME[0]}"
-            fi
-        fi
-
-    else
-        if [[ $SUBSCRAPING == false ]]; then
-            skip_notification "disabled"
-        else
-            skip_notification "processed"
-        fi
-    fi
-
-}
-
-function sub_analytics() {
-
-    # Create necessary directories
-    if ! mkdir -p .tmp subdomains; then
-        print_warnf "Failed to create directories."
-        return 1
-    fi
-
-    # Check if the function should run
-    if { [[ ! -f "$called_fn_dir/.${FUNCNAME[0]}" ]] || [[ $DIFF == true ]]; } && [[ $SUBANALYTICS == true ]]; then
-        start_subfunc "${FUNCNAME[0]}" "Running: Analytics Subdomain Enumeration"
-
-        if [[ -s ".tmp/probed_tmp_scrap.txt" ]]; then
-            # Run analyticsrelationships with timeout; tool may panic on builtwith errors
-            if [[ -n ${TIMEOUT_CMD:-} ]]; then
-                if ! "$TIMEOUT_CMD" 2m analyticsrelationships -ch <.tmp/probed_tmp_scrap.txt >>.tmp/analytics_subs_tmp.txt 2>>"$LOGFILE"; then
-                    log_note "analyticsrelationships failed (builtwith error or panic); skipping" "${FUNCNAME[0]}" "${LINENO}"
-                fi
-            else
-                if ! analyticsrelationships -ch <.tmp/probed_tmp_scrap.txt >>.tmp/analytics_subs_tmp.txt 2>>"$LOGFILE"; then
-                    log_note "analyticsrelationships failed (builtwith error or panic); skipping" "${FUNCNAME[0]}" "${LINENO}"
-                fi
-            fi
-
-            if [[ -s ".tmp/analytics_subs_tmp.txt" ]]; then
-                grep -E "$DOMAIN_MATCH_REGEX" .tmp/analytics_subs_tmp.txt \
-                    | grep -E '^([a-zA-Z0-9\.\-]+\.)+[a-zA-Z]{1,}$' \
-                    | sed "s/|__ //" | anew -q .tmp/analytics_subs_clean.txt || true
-
-                if [[ -s ".tmp/analytics_subs_clean.txt" ]]; then
-                    _resolve_domains .tmp/analytics_subs_clean.txt .tmp/analytics_subs_resolved.txt
-                fi
-            fi
-        fi
-
-        if [[ $INSCOPE == true ]]; then
-            if ! check_inscope .tmp/analytics_subs_resolved.txt 2>>"$LOGFILE" >/dev/null; then
-                print_warnf "check_inscope command failed."
-            fi
-        fi
-
-        if ! NUMOFLINES=$(cat .tmp/analytics_subs_resolved.txt 2>/dev/null | anew subdomains/subdomains.txt 2>/dev/null | sed '/^$/d' | wc -l); then
-            NUMOFLINES=0
-        fi
-
-        end_subfunc "${NUMOFLINES} new subs (analytics relationship)" "${FUNCNAME[0]}"
-
-    else
-        if [[ $SUBANALYTICS == false ]]; then
-            skip_notification "disabled"
-        else
-            skip_notification "processed"
-        fi
-    fi
 }
 
 function sub_ns_delegation() {
