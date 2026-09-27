@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # subenum pipeline: enumerate subdomains, diff new ones, then httpx -> katana -> nuclei.
 # Usage: script.sh [-l <domain-list-file>]
+# Progress is printed live; subenum output is streamed to the terminal and logged.
 
 BASE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DOMAIN_LIST="$BASE/domains.txt"
@@ -11,9 +12,12 @@ OUT_DIR="$BASE/data"
 # subenum flags, e.g. "--deep" or "--only sub_passive,sub_crt"
 SUBENUM_OPTS=""
 
+# heartbeat while a step runs (seconds); override with HEARTBEAT_INTERVAL=10
+HEARTBEAT_INTERVAL="${HEARTBEAT_INTERVAL:-30}"
+
 # httpx
 HTTPX_TIMEOUT=5
-HTTPX_EXTRA_OPTS="-sc -title -cl -wc -td -nc"
+HTTPX_EXTRA_OPTS="-sc -title -wc -nc"
 
 # katana
 KATANA_DEPTH=1
@@ -35,6 +39,24 @@ NOTIFY_ID_BUGS="bugs"
 
 # Skip notify calls silently when the binary is not installed
 notify_file() { command -v notify >/dev/null 2>&1 && notify "$@"; }
+
+# Timestamped progress line
+log() { printf '[%s] %s\n' "$(date '+%H:%M:%S')" "$*"; }
+
+# Wait for PID, printing a heartbeat every HEARTBEAT_INTERVAL seconds
+wait_with_heartbeat() {
+    local pid="$1" label="$2" start="$3"
+    local next=$(( $(date +%s) + HEARTBEAT_INTERVAL ))
+    while kill -0 "$pid" 2>/dev/null; do
+        sleep 1
+        kill -0 "$pid" 2>/dev/null || break
+        if (( $(date +%s) >= next )); then
+            log "$label still running (elapsed $(( $(date +%s) - start ))s)"
+            next=$(( $(date +%s) + HEARTBEAT_INTERVAL ))
+        fi
+    done
+    wait "$pid" 2>/dev/null || true
+}
 
 # -l <file>: use a specific domain list (default: $BASE/domains.txt)
 while [[ $# -gt 0 ]]; do
@@ -60,8 +82,10 @@ if [[ ! -f "$DOMAIN_LIST" ]]; then
     exit 1
 fi
 
+log "Target list: $DOMAIN_LIST"
+
 for domain in $(cat "$DOMAIN_LIST"); do
-    echo "Working on $domain"
+    log "Working on $domain"
 
     # Clean up bug files at the START of each domain iteration
     rm -f "$OUT_DIR/$domain.httpx" "$OUT_DIR/$domain.nuclei" "$OUT_DIR/$domain.jsurls" "$OUT_DIR/$domain.tokens" 2>/dev/null || true
@@ -69,55 +93,56 @@ for domain in $(cat "$DOMAIN_LIST"); do
     # Remove .called_fn file so subenum re-runs all methods
     rm -rf -- "$RECON_DIR/$domain/.called_fn" 2>/dev/null || true
 
-    # Run subenum
-    echo -n "Running subenum... "
-    start_time=$(date +%s)
+    # Run subenum (streamed live to the terminal and appended to the log)
     LOG_FILE="/var/log/recon.log"
     if [[ ! -w /var/log ]]; then
         LOG_FILE="$BASE/logs/recon.log"
         mkdir -p "$BASE/logs"
     fi
-    echo "========================================" >> "$LOG_FILE"
-    echo "$(date '+%Y-%m-%d %H:%M:%S') - Starting subenum for $domain" >> "$LOG_FILE"
-    echo "========================================" >> "$LOG_FILE"
-    bash "$SUBENUM_SCRIPT" -d "$domain" $SUBENUM_OPTS >> "$LOG_FILE" 2>&1
+    log "Running subenum (log: $LOG_FILE)"
+    start_time=$(date +%s)
+    {
+        echo "========================================"
+        echo "$(date '+%Y-%m-%d %H:%M:%S') - Starting subenum for $domain"
+        echo "========================================"
+    } >> "$LOG_FILE"
+    ( bash "$SUBENUM_SCRIPT" -d "$domain" $SUBENUM_OPTS 2>&1 | tee -a "$LOG_FILE" ) &
+    wait_with_heartbeat $! "subenum" "$start_time"
     elapsed=$(($(date +%s) - start_time))
     echo "$(date '+%Y-%m-%d %H:%M:%S') - Completed in ${elapsed}s" >> "$LOG_FILE"
-    echo "time took ${elapsed}s (log: $LOG_FILE)"
+    log "subenum finished in ${elapsed}s"
 
     subfile="$RECON_DIR/$domain/subdomains/subdomains.txt"
     if [[ ! -f "$subfile" ]]; then
-        echo "WARNING: Subdomains file not found: $subfile"
-        echo "Skipping $domain..."
+        log "WARNING: subdomains file not found: $subfile - skipping $domain"
         continue
     fi
 
-    echo -n "Checking for new subdomains... "
+    log "Checking for new subdomains..."
     out_all="$OUT_DIR/$domain.txt.all"
     out_new="$OUT_DIR/$domain.txt.new"
-    start_time=$(date +%s)
     anew "$out_all" < "$subfile" > "$out_new"
-    elapsed=$(($(date +%s) - start_time))
     new_count=$(wc -l < "$out_new" 2>/dev/null || echo 0)
-    echo "found ${new_count} new subdomains (${elapsed}s)"
+    log "Found ${new_count} new subdomains"
 
     # Skip if no new subdomains
     if [[ ! -s "$out_new" ]]; then
-        echo "No new subdomains found for $domain, skipping..."
+        log "No new subdomains found for $domain, skipping..."
         continue
     fi
 
     # Run HTTPX
-    echo -n "Running httpx (timeout: ${HTTPX_TIMEOUT}s)... "
+    log "Running httpx (timeout: ${HTTPX_TIMEOUT}s)..."
     start_time=$(date +%s)
-    httpx -silent -timeout "$HTTPX_TIMEOUT" $HTTPX_EXTRA_OPTS 2>/dev/null < "$out_new" > "$OUT_DIR/$domain.httpx"
+    httpx -silent -timeout "$HTTPX_TIMEOUT" $HTTPX_EXTRA_OPTS 2>/dev/null < "$out_new" > "$OUT_DIR/$domain.httpx" &
+    wait_with_heartbeat $! "httpx" "$start_time"
     elapsed=$(($(date +%s) - start_time))
     alive_count=$(wc -l < "$OUT_DIR/$domain.httpx" 2>/dev/null || echo 0)
-    echo "found ${alive_count} alive hosts - time took ${elapsed}s"
+    log "httpx: ${alive_count} alive hosts (${elapsed}s)"
 
     # Deduplicate: keep the first full line for each unique combination of all fields after the URL
     if [[ -s "$OUT_DIR/$domain.httpx" ]]; then
-        awk '/^https?:\/\// {rest=substr($0, index($0, " ") + 1); if (!seen[rest]++) print $0}' \
+        awk '{ key=$0; sub(/^[^ \t]+[ \t]+/, "", key); if (!seen[key]++) print }' \
             "$OUT_DIR/$domain.httpx" > "$OUT_DIR/$domain.httpx.tmp"
         mv "$OUT_DIR/$domain.httpx.tmp" "$OUT_DIR/$domain.httpx"
         notify_file -data "$OUT_DIR/$domain.httpx" -id "$NOTIFY_ID_HTTPX" -bulk
@@ -125,41 +150,44 @@ for domain in $(cat "$DOMAIN_LIST"); do
 
     # Run Katana
     if [[ -s "$OUT_DIR/$domain.httpx" ]]; then
-        echo -n "Finding JS files with katana (depth: ${KATANA_DEPTH})... "
+        log "Finding JS files with katana (depth: ${KATANA_DEPTH})..."
         start_time=$(date +%s)
-        cut -d " " -f 1 "$OUT_DIR/$domain.httpx" | katana $KATANA_EXTRA_OPTS -d "$KATANA_DEPTH" -mr "$KATANA_REGEX" 2>/dev/null | sort -u > "$OUT_DIR/$domain.jsurls"
+        cut -d " " -f 1 "$OUT_DIR/$domain.httpx" | katana $KATANA_EXTRA_OPTS -d "$KATANA_DEPTH" -mr "$KATANA_REGEX" 2>/dev/null | sort -u > "$OUT_DIR/$domain.jsurls" &
+        wait_with_heartbeat $! "katana" "$start_time"
         elapsed=$(($(date +%s) - start_time))
         js_count=$(wc -l < "$OUT_DIR/$domain.jsurls" 2>/dev/null || echo 0)
-        echo "found ${js_count} JS files - time took ${elapsed}s"
+        log "katana: ${js_count} JS files (${elapsed}s)"
     else
-        echo "Skipping katana (no httpx results)"
+        log "Skipping katana (no httpx results)"
     fi
 
-    # Run Nuclei Credentials Scan
+    # Run Nuclei Credentials Scan (findings stream live via tee)
     if [[ -s "$OUT_DIR/$domain.jsurls" ]]; then
-        echo "Scanning for credentials with nuclei..."
+        log "Scanning for credentials with nuclei..."
         start_time=$(date +%s)
-        nuclei -silent -nc -l "$OUT_DIR/$domain.jsurls" -id credentials-disclosure | tee "$OUT_DIR/$domain.tokens"
+        nuclei -silent -nc -l "$OUT_DIR/$domain.jsurls" -id credentials-disclosure | tee "$OUT_DIR/$domain.tokens" &
+        wait_with_heartbeat $! "nuclei credentials" "$start_time"
         elapsed=$(($(date +%s) - start_time))
-        echo "Credentials scan completed - time took ${elapsed}s"
+        log "Credentials scan completed (${elapsed}s)"
         if [[ -s "$OUT_DIR/$domain.tokens" ]]; then
             notify_file -data "$OUT_DIR/$domain.tokens" -id "$NOTIFY_ID_TOKENS" -bulk
         fi
     else
-        echo "Skipping credentials scan (no JS files found)"
+        log "Skipping credentials scan (no JS files found)"
     fi
 
-    # Run Full Nuclei Scan
+    # Run Full Nuclei Scan (findings stream live via tee)
     if [[ ! -s "$OUT_DIR/$domain.httpx" ]]; then
-        echo "Skipping full nuclei scan (no httpx results)"
+        log "Skipping full nuclei scan (no httpx results)"
     elif [[ ! -d "$NUCLEI_TEMPLATES" ]]; then
-        echo "WARNING: nuclei templates not found at $NUCLEI_TEMPLATES - skipping full nuclei scan"
+        log "WARNING: nuclei templates not found at $NUCLEI_TEMPLATES - skipping full nuclei scan"
     else
-        echo "Running full nuclei scan..."
+        log "Running full nuclei scan..."
         start_time=$(date +%s)
-        cut -d " " -f 1 "$OUT_DIR/$domain.httpx" | nuclei -t "$NUCLEI_TEMPLATES" $NUCLEI_EXTRA_OPTS -si "$NUCLEI_STATS_INTERVAL" -etags "$NUCLEI_EXCLUDE_TAGS" -es "$NUCLEI_EXCLUDE_SEVERITY" -eid "$NUCLEI_EXCLUDE_IDS" | tee "$OUT_DIR/$domain.nuclei"
+        cut -d " " -f 1 "$OUT_DIR/$domain.httpx" | nuclei -t "$NUCLEI_TEMPLATES" $NUCLEI_EXTRA_OPTS -si "$NUCLEI_STATS_INTERVAL" -etags "$NUCLEI_EXCLUDE_TAGS" -es "$NUCLEI_EXCLUDE_SEVERITY" -eid "$NUCLEI_EXCLUDE_IDS" | tee "$OUT_DIR/$domain.nuclei" &
+        wait_with_heartbeat $! "nuclei" "$start_time"
         elapsed=$(($(date +%s) - start_time))
-        echo "Full nuclei scan completed - time took ${elapsed}s"
+        log "Full nuclei scan completed (${elapsed}s)"
         if [[ -s "$OUT_DIR/$domain.nuclei" ]]; then
             notify_file -data "$OUT_DIR/$domain.nuclei" -id "$NOTIFY_ID_BUGS" -bulk
         fi
