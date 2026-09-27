@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # subenum pipeline: enumerate subdomains, diff new ones, then httpx -> katana -> nuclei.
+# Usage: script.sh [-l <domain-list-file>]
 
 BASE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DOMAIN_LIST="$BASE/domains.txt"
@@ -35,9 +36,27 @@ NOTIFY_ID_BUGS="bugs"
 # Skip notify calls silently when the binary is not installed
 notify_file() { command -v notify >/dev/null 2>&1 && notify "$@"; }
 
+# -l <file>: use a specific domain list (default: $BASE/domains.txt)
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -l)
+            if [[ -z "${2:-}" ]]; then
+                echo "ERROR: -l requires a file argument" >&2
+                exit 1
+            fi
+            DOMAIN_LIST="$2"
+            shift 2
+            ;;
+        *)
+            echo "ERROR: unknown argument: $1 (usage: $0 [-l <domain-list-file>])" >&2
+            exit 1
+            ;;
+    esac
+done
+
 mkdir -p "$OUT_DIR" || { echo "ERROR: Cannot create output directory: $OUT_DIR" >&2; exit 1; }
 if [[ ! -f "$DOMAIN_LIST" ]]; then
-    echo "ERROR: domain list not found: $DOMAIN_LIST" >&2
+    echo "ERROR: domain list not found: $DOMAIN_LIST (use -l <file>)" >&2
     exit 1
 fi
 
