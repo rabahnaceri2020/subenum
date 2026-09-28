@@ -728,6 +728,7 @@ function sub_dns() {
         start_subfunc "${FUNCNAME[0]}" "Running: DNS Subdomain Enumeration and PTR search"
 
         if [[ -s "subdomains/subdomains.txt" ]]; then
+            print_notice RUN "sub_dns" "collecting DNS records (dnsx -recon)"
             run_command dnsx -r "$resolvers_trusted" -recon -silent -retry 3 -json \
                 -o "subdomains/subdomains_dnsregs.json" <"subdomains/subdomains.txt" 2>>"$LOGFILE" >/dev/null
         fi
@@ -743,16 +744,18 @@ function sub_dns() {
                 | grep -E '^([a-zA-Z0-9][-a-zA-Z0-9]*\.)+[a-zA-Z]{2,}$' | sort -u \
                 | anew -q .tmp/subdomains_dns.txt || true
 
-            jq -r '.. | strings | select(test("^(\\d{1,3}\\.){3}\\d{1,3}$|^[0-9a-fA-F:]+$"))' <"subdomains/subdomains_dnsregs.json" \
-                | sort -u \
-                | while IFS= read -r ip; do
-                    [[ -z "$ip" ]] && continue
-                    run_command curl -s "https://ip.thc.org/$ip" 2>>"$LOGFILE" \
-                        | grep -E "$DOMAIN_MATCH_REGEX" \
-                        | grep -E '^([a-zA-Z0-9][-a-zA-Z0-9]*\.)+[a-zA-Z]{2,}$' \
-                        | sort -u \
-                        | anew -q .tmp/subdomains_dns.txt || true
-                done
+            # Extra reverse-IP pivots via ip.thc.org (DEEP only: one HTTP request
+            # per IP; capped and parallel so it cannot stall the run)
+            if [[ "${DEEP:-false}" == true ]]; then
+                print_notice RUN "sub_dns" "reverse-IP pivots (ip.thc.org)"
+                jq -r '.. | strings | select(test("^(\\d{1,3}\\.){3}\\d{1,3}$"))' <"subdomains/subdomains_dnsregs.json" \
+                    | sort -u | head -n "${REVERSE_IP_MAX:-100}" \
+                    | xargs -r -P "${REVERSE_IP_THREADS:-8}" -I{} curl -s --max-time 10 "https://ip.thc.org/{}" 2>>"$LOGFILE" \
+                    | grep -E "$DOMAIN_MATCH_REGEX" \
+                    | grep -E '^([a-zA-Z0-9][-a-zA-Z0-9]*\.)+[a-zA-Z]{2,}$' \
+                    | sort -u \
+                    | anew -q .tmp/subdomains_dns.txt || true
+            fi
 
             jq -r 'select(.host) |"\(.host) - \((.a // [])[])", "\(.host) - \((.aaaa // [])[])"' <"subdomains/subdomains_dnsregs.json" \
                 | grep -E ' - [0-9a-fA-F:.]+$' | sort -u | anew -q "subdomains/subdomains_ips.txt" || true
@@ -804,6 +807,12 @@ function sub_brute() {
 
         wordlist="$subs_wordlist"
         [[ $DEEP == true ]] && wordlist="$subs_wordlist_big"
+
+        if [[ ! -s "$wordlist" ]]; then
+            _print_msg WARN "Brute wordlist missing or empty: $wordlist (run ./install.sh --tools to fetch it)"
+            end_subfunc "0 new subs (bruteforce - missing wordlist)" "${FUNCNAME[0]}" "SKIP"
+            return 0
+        fi
 
         _bruteforce_domains "$wordlist" "$domain" .tmp/subs_brute.txt
 
@@ -874,9 +883,12 @@ function sub_ns_delegation() {
             return
         fi
 
-        # Parse delegated zones and attempt AXFR on each
+        # Parse delegated zones and attempt AXFR on each (bounded: per-dig
+        # timeout and a cap on total attempts so a dead NS cannot stall the run)
         : >.tmp/ns_delegated_zones.txt
         : >.tmp/ns_axfr_results.txt
+        local axfr_attempts=0
+        local max_axfr_attempts="${NS_AXFR_MAX:-50}"
 
         while IFS= read -r line; do
             local sub ns_raw
@@ -890,11 +902,14 @@ function sub_ns_delegation() {
                 # Attempt AXFR on each delegated NS
                 while IFS= read -r ns; do
                     [[ -z "$ns" ]] && continue
-                    dig axfr "$sub" @"$ns" +short 2>>"$LOGFILE" \
+                    (( axfr_attempts++ )) || true
+                    (( axfr_attempts > max_axfr_attempts )) && break
+                    dig +time=3 +tries=1 axfr "$sub" @"$ns" +short 2>>"$LOGFILE" \
                         | awk '{print $1}' \
                         | sed -e 's/\.$//' -e '/^$/d' \
                         >> .tmp/ns_axfr_results.txt || true
                 done <<< "$ns_raw"
+                (( axfr_attempts > max_axfr_attempts )) && break
             fi
         done < .tmp/ns_delegation_raw.txt
 
@@ -974,6 +989,20 @@ _generate_permutation_candidates() {
     : >"$output_file"
     [[ -s "$source_file" ]] || return 0
     _run_permutation_engine "$source_file" | sed '/^\s*$/d' | head -c "$PERMUTATIONS_LIMIT" >"$output_file"
+}
+
+# Return 0 when the target is small enough for expensive permutations
+# (same limits sub_permut uses; DEEP bypasses them)
+_permutations_allowed() {
+    [[ "${DEEP:-false}" == true ]] && return 0
+    local subdomain_count=0 subs_no_resolved_count=0
+    [[ -s "subdomains/subdomains.txt" ]] && subdomain_count=$(wc -l <subdomains/subdomains.txt 2>/dev/null | tr -d ' ')
+    [[ -s ".tmp/subs_no_resolved.txt" ]] && subs_no_resolved_count=$(wc -l <.tmp/subs_no_resolved.txt 2>/dev/null | tr -d ' ')
+    [[ "$subdomain_count" =~ ^[0-9]+$ ]] || subdomain_count=0
+    [[ "$subs_no_resolved_count" =~ ^[0-9]+$ ]] || subs_no_resolved_count=0
+    (( subdomain_count <= ${DEEP_LIMIT:-500} )) && return 0
+    (( subs_no_resolved_count <= ${DEEP_LIMIT2:-1500} )) && return 0
+    return 1
 }
 
 function sub_permut() {
@@ -1081,6 +1110,11 @@ function sub_regex_permut() {
             return 0
         fi
 
+        if ! _permutations_allowed; then
+            end_subfunc "Skipping regex permutations: Too Many Subdomains" "${FUNCNAME[0]}"
+            return 0
+        fi
+
         # Run regulator in a subshell to avoid CWD pollution
         (
             cd "${tools}/regulator" || exit 1
@@ -1151,6 +1185,11 @@ function sub_ia_permut() {
         if ! command -v subwiz &>/dev/null; then
             _print_msg WARN "subwiz not installed, skipping AI permutations."
             end_subfunc "0 new subs (permutations by IA)" "${FUNCNAME[0]}" "SKIP"
+            return 0
+        fi
+
+        if ! _permutations_allowed; then
+            end_subfunc "Skipping AI permutations: Too Many Subdomains" "${FUNCNAME[0]}"
             return 0
         fi
 
@@ -1386,7 +1425,7 @@ function zonetransfer() {
 
         # Perform zone transfer check
         for ns in $(run_command dig +short ns "$domain" 2>/dev/null); do
-            run_command dig axfr "${domain}" @"$ns" 2>>"$LOGFILE" | tee -a "subdomains/zonetransfer.txt" >/dev/null
+            run_command dig +time=3 +tries=1 axfr "${domain}" @"$ns" 2>>"$LOGFILE" | tee -a "subdomains/zonetransfer.txt" >/dev/null
         done
 
         # Check if zone transfer was successful and harvest hostnames
