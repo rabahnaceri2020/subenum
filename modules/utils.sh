@@ -76,84 +76,6 @@ function rotate_logs() {
     fi
 }
 
-function validate_config() {
-    local warnings=0
-    local errors=0
-
-    # Validate numeric thread/rate variables
-    for var in DNSX_THREADS DNSX_RATE_LIMIT TLSX_THREADS PERMUTATIONS_SHORT_THRESHOLD; do
-        if [[ -n "${!var:-}" && ! "${!var}" =~ ^[0-9]+$ ]]; then
-            print_errorf "%s must be numeric, got: %s" "$var" "${!var}"
-            errors=$((errors + 1))
-        fi
-    done
-
-    if [[ -n "${PERMUTATIONS_WORDLIST_MODE:-}" ]]; then
-        case "${PERMUTATIONS_WORDLIST_MODE}" in
-            auto|full|short) : ;;
-            *)
-                print_warnf "PERMUTATIONS_WORDLIST_MODE invalid: '%s' (use auto|full|short)" "${PERMUTATIONS_WORDLIST_MODE}"
-                warnings=$((warnings + 1))
-                ;;
-        esac
-    fi
-    if [[ -n "${DNS_RESOLVER:-}" ]]; then
-        case "${DNS_RESOLVER}" in
-            auto|puredns|dnsx) : ;;
-            *)
-                print_warnf "DNS_RESOLVER invalid: '%s' (use auto|puredns|dnsx)" "${DNS_RESOLVER}"
-                warnings=$((warnings + 1))
-                ;;
-        esac
-    fi
-
-    if [[ $errors -gt 0 ]]; then
-        print_errorf "Configuration has %d error(s). Please fix before running." "$errors"
-        return $E_CONFIG
-    fi
-    if [[ $warnings -gt 0 ]]; then
-        print_notice INFO "config" "Configuration has ${warnings} warning(s)."
-    fi
-    return 0
-}
-
-# Auto-tune concurrency knobs according to host resources and PERF_PROFILE.
-# Usage: apply_performance_profile
-function apply_performance_profile() {
-    # shellcheck disable=SC2034  # Thread/rate vars are consumed by sourced modules at runtime
-    local profile="${PERF_PROFILE:-balanced}"
-    local cores mem_gb
-
-    cores=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
-    if [[ "$OSTYPE" == "darwin"* ]]; then
-        mem_gb=$(( $(sysctl -n hw.memsize 2>/dev/null || echo 8589934592) / 1024 / 1024 / 1024 ))
-    else
-        mem_gb=$(( $(awk '/MemTotal/ {print $2}' /proc/meminfo 2>/dev/null || echo 8388608) / 1024 / 1024 ))
-    fi
-    [[ "$cores" =~ ^[0-9]+$ ]] || cores=4
-    [[ "$mem_gb" =~ ^[0-9]+$ ]] || mem_gb=8
-
-    case "$profile" in
-        low)
-            PARALLEL_MAX_JOBS=${PARALLEL_MAX_JOBS:-2}
-            ;;
-        max)
-            PARALLEL_MAX_JOBS=${PARALLEL_MAX_JOBS:-$((cores > 2 ? cores - 1 : 2))}
-            ;;
-        *)
-            PARALLEL_MAX_JOBS=${PARALLEL_MAX_JOBS:-$((cores > 1 ? cores / 2 : 1))}
-            ;;
-    esac
-
-    # Clamp aggressive defaults for low-memory hosts.
-    if [[ "$mem_gb" -lt 6 ]]; then
-        ((PARALLEL_MAX_JOBS > 2)) && PARALLEL_MAX_JOBS=2
-    fi
-
-    ((PARALLEL_MAX_JOBS < 1)) && PARALLEL_MAX_JOBS=1
-    PERF_PROFILE_INFO="PERF_PROFILE=${profile} | cores=${cores} mem=${mem_gb}GB | jobs=${PARALLEL_MAX_JOBS}"
-}
-
 function getElapsedTime {
     # Sets $runtime (for backward compat) and also prints to stdout
     runtime=""
@@ -218,38 +140,6 @@ function explain_err() {
     fi
 }
 
-# Check available disk space
-# Usage: check_disk_space <required_gb> <path>
-# Returns 0 if enough space, 1 otherwise
-function check_disk_space() {
-    local required_gb="$1"
-    local check_path="${2:-.}"
-
-    # Get available space in GB (portable across macOS/Linux).
-    local available_gb
-    available_gb=$(df -Pk "$check_path" 2>/dev/null | awk 'NR==2 {print int($4 / 1024 / 1024)}')
-
-    if [ -z "$available_gb" ] || [ "$available_gb" -lt "$required_gb" ]; then
-        DISK_SPACE_INFO="Disk space LOW: required ${required_gb}GB, available ${available_gb:-0}GB at ${check_path}"
-        return 1
-    fi
-
-    DISK_SPACE_INFO="Disk space OK: ${available_gb}GB available at ${check_path}"
-    return 0
-}
-
-# Mid-run disk-full check: thin wrapper around check_disk_space using MIN_DISK_SPACE_GB.
-function _check_disk_mid_run() {
-    check_disk_space "${MIN_DISK_SPACE_GB:-5}" "${dir:-.}"
-    return $?
-}
-
-# Hard-abort the run on disk-full mid-run detection.
-function _abort_disk_full() {
-    _print_error "disk_full: aborting (${DISK_SPACE_INFO:-disk space exhausted})"
-    exit 1
-}
-
 # Execute command in dry-run mode if enabled
 # Usage: run_command <command> [args...]
 function run_command() {
@@ -258,10 +148,6 @@ function run_command() {
         local tool_name="${1##*/}"
         local full_cmd="$*"
         local redacted_cmd="$full_cmd"
-
-        if declare -F redact_secrets >/dev/null 2>&1; then
-            redacted_cmd=$(redact_secrets "$redacted_cmd")
-        fi
 
         # Track command for module summary
         if declare -F ui_dryrun_track >/dev/null 2>&1; then
@@ -397,22 +283,6 @@ _sanitize_list_entry() {
 ####################################### DEEP HELPERS ##########################################################
 ###############################################################################################################
 
-# Check if we should run in DEEP mode based on flag or item count
-# Usage: should_run_deep <count> [limit]
-function should_run_deep() {
-    local count="${1:-0}"
-    local limit="${2:-$DEEP_LIMIT}"
-
-    [[ "$DEEP" == true ]] && return 0
-    [[ "$count" -le "$limit" ]] && return 0
-    return 1
-}
-
-function should_run_deep2() {
-    local count="${1:-0}"
-    should_run_deep "$count" "${DEEP_LIMIT2:-500}"
-}
-
 ###############################################################################################################
 ####################################### RESOURCE CACHE ########################################################
 ###############################################################################################################
@@ -465,11 +335,6 @@ function cache_is_valid() {
     else
         return 1
     fi
-}
-
-# Download file with caching support
-function cached_download() {
-    cached_download_typed "$1" "$2" "${3:-$(basename "$1")}" "tools"
 }
 
 # Download file with typed cache support

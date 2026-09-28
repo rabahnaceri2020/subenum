@@ -45,7 +45,6 @@ fi
 
 # Initialize variables
 dir="${tools}"
-double_check=false
 ARCH=$(uname -m)
 IS_MAC=$([[ $OSTYPE == "darwin"* ]] && echo "True" || echo "False")
 
@@ -59,7 +58,6 @@ else
 fi
 
 # Globals for CLI overrides
-FORCE_UPDATE=${FORCE_UPDATE:-false}
 VERBOSE=${VERBOSE:-false}
 LOGFILE=${LOGFILE:-"./install.log"}
 DRY_RUN=${DRY_RUN:-false}
@@ -75,22 +73,6 @@ if [[ -n ${LOGFILE} ]]; then
     : >"${LOGFILE}"
     exec > >(tee -a "${LOGFILE}") 2>&1
 fi
-
-run_to() {
-    local secs=$1
-    shift || true
-    if [[ -n $TIMEOUT_CMD ]]; then "$TIMEOUT_CMD" "$secs" "$@"; else "$@"; fi
-}
-
-run_cmd() {
-    if [[ $DRY_RUN == "true" ]]; then
-        printf "%s" "[DRY-RUN] "
-        printf "%q " "$@"
-        printf "\n"
-        return 0
-    fi
-    "$@"
-}
 
 q() {
     if [[ $DRY_RUN == "true" ]]; then
@@ -128,13 +110,6 @@ retry() {
         if ((n >= attempts)); then return 1; fi
         sleep $((delay * n))
     done
-}
-
-ensure_git_dir() {
-    local _path="$1"
-    if [[ -d "$_path" && ! -d "$_path/.git" ]]; then
-        rm -rf "$_path" 2>/dev/null || true
-    fi
 }
 
 # Non-fatal error trap: log and continue
@@ -326,7 +301,6 @@ function install_tools() {
             else
                 failed_tools+=("$gotool")
                 ((++go_fail))
-                double_check=true
                 msg_err "[$go_step/$total_go] ${gotool} failed"
             fi
         fi
@@ -348,7 +322,6 @@ function install_tools() {
         else
             failed_pipx_tools+=("$pipxtool")
             ((++px_fail))
-            double_check=true
             msg_err "[$pipx_step/$total_px] ${pipxtool} failed"
         fi
     done
@@ -382,7 +355,6 @@ function install_tools() {
                 msg_err "[$repos_step/$total_repo] $repo clone failed"
                 failed_repos+=("$repo")
                 ((++repo_fail))
-                double_check=true
                 continue
             fi
             ((++repo_ok))
@@ -392,7 +364,6 @@ function install_tools() {
             msg_err "[$repos_step/$total_repo] $repo: cannot enter ${dir}/${repo}"
             failed_repos+=("$repo")
             ((++repo_fail))
-            double_check=true
             continue
         }
 
@@ -403,7 +374,6 @@ function install_tools() {
             msg_err "[$repos_step/$total_repo] $repo pull failed"
             failed_repos+=("$repo")
             ((++repo_fail))
-            double_check=true
             continue
         fi
 
@@ -844,17 +814,11 @@ function handle_install_arguments() {
                 ;;
             --verbose)
                 VERBOSE=true
-                DEBUG_STD=""
-                DEBUG_ERROR=""
                 shift
                 ;;
             --log)
                 LOGFILE="$2"
                 shift 2 || true
-                ;;
-            --force-update)
-                FORCE_UPDATE=true
-                shift
                 ;;
             --dry-run)
                 DRY_RUN=true

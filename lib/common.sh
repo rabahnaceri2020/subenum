@@ -5,8 +5,6 @@
 # Prevent multiple sourcing
 [[ -n "$_COMMON_SH_LOADED" ]] && return 0
 declare -r _COMMON_SH_LOADED=1
-declare -a INCIDENTS_LEVELS=()
-declare -a INCIDENTS_ITEMS=()
 
 ###############################################################################
 # Directory Management
@@ -26,42 +24,6 @@ ensure_dirs() {
     return 0
 }
 
-# Create standard reconftw working directories
-# Usage: ensure_workdirs
-ensure_workdirs() {
-    ensure_dirs .tmp webs subdomains hosts vulns osint fuzzing js screenshots
-}
-
-# Ensure webs/webs_all.txt exists and is populated from the current web targets.
-# This avoids pipefail noise when one of the source files doesn't exist yet.
-# Usage: ensure_webs_all
-ensure_webs_all() {
-    if ! ensure_dirs webs .tmp; then
-        return 1
-    fi
-
-    local out="webs/webs_all.txt"
-    local tmp=".tmp/webs_all_candidates.txt"
-
-    : >"$tmp" 2>/dev/null || return 1
-
-    [[ -s "webs/webs.txt" ]] && cat "webs/webs.txt" >>"$tmp"
-    [[ -s "webs/webs_uncommon_ports.txt" ]] && cat "webs/webs_uncommon_ports.txt" >>"$tmp"
-
-    touch "$out" 2>/dev/null || return 1
-
-    if [[ -s "$tmp" ]]; then
-        # Strip empty lines to avoid polluting target lists.
-        if command -v anew &>/dev/null; then
-            sed '/^$/d' "$tmp" | anew -q "$out" 2>/dev/null || true
-        else
-            sed '/^$/d' "$tmp" >>"$out" 2>/dev/null || return 1
-        fi
-    fi
-
-    return 0
-}
-
 ###############################################################################
 # File Operations
 ###############################################################################
@@ -78,47 +40,6 @@ safe_backup() {
     return 0
 }
 
-# Append unique lines to a file using anew (falls back to cat if anew unavailable)
-# Usage: dedupe_append filename
-# Reads from stdin
-dedupe_append() {
-    local file="$1"
-    if command -v anew &>/dev/null; then
-        anew -q "$file" 2>/dev/null
-    else
-        # Fallback: simple append (no dedup)
-        cat >> "$file"
-    fi
-}
-
-# Pipe-safe anew wrapper: treats rc=1 (no new lines added) as success.
-# Usage: ... | anew_safe <file>
-anew_safe() {
-    local file="$1"
-    if ! command -v anew &>/dev/null; then
-        cat >> "$file"
-        return 0
-    fi
-    anew "$file"
-    local rc=$?
-    (( rc <= 1 )) && return 0
-    return "$rc"
-}
-
-# Pipe-safe anew -q wrapper: treats rc=1 (no new lines added) as success.
-# Usage: ... | anew_q_safe <file>
-anew_q_safe() {
-    local file="$1"
-    if ! command -v anew &>/dev/null; then
-        cat >> "$file"
-        return 0
-    fi
-    anew -q "$file"
-    local rc=$?
-    (( rc <= 1 )) && return 0
-    return "$rc"
-}
-
 # Count non-empty lines in a file safely
 # Usage: count_lines filename
 # Returns: line count (0 if file doesn't exist or is empty)
@@ -129,14 +50,6 @@ count_lines() {
     else
         echo 0
     fi
-}
-
-# Count lines from stdin, with fallback to 0 on failure
-# Usage: result=$(command | count_lines_stdin)
-count_lines_stdin() {
-    local count
-    count=$(sed '/^$/d' | wc -l | tr -d ' ') || count=0
-    echo "${count:-0}"
 }
 
 ###############################################################################
@@ -251,32 +164,6 @@ print_task() {
     printf "%b%-5s%b %s%s %6s" "$color" "$state" "${reset:-}" "$mod" "$spaces" "$duration_fmt"
     if [[ -n "$reason" ]]; then
         printf " (%s)" "$reason"
-    fi
-    printf "\n"
-}
-
-record_incident() {
-    local level="$1" module="$2" reason="$3"
-    [[ -z "$module" ]] && return 0
-    [[ -z "$reason" ]] && return 0
-    reason=${reason//\\n/ }
-    reason=${reason//$'\n'/ }
-    INCIDENTS_LEVELS+=("$level")
-    INCIDENTS_ITEMS+=("${module} — ${reason}")
-}
-
-print_incidents() {
-    _ui_human_output_enabled || return 0
-    local debug_log="${1:-}"
-    local count=${#INCIDENTS_ITEMS[@]}
-    ((count == 0)) && return 0
-    printf "\nINCIDENTS (actionable)\n"
-    local i
-    for i in "${!INCIDENTS_ITEMS[@]}"; do
-        printf "%d. %s\n" "$((i + 1))" "${INCIDENTS_ITEMS[$i]}"
-    done
-    if [[ -n "$debug_log" ]] && [[ -s "$debug_log" ]]; then
-        printf "Debug log: %s\n" "$debug_log"
     fi
     printf "\n"
 }
@@ -409,10 +296,6 @@ _print_module_start() {
     title=$(printf "%s" "${1:-}" | tr '[:lower:]' '[:upper:]')
     local ts
     ts=$(date +'%Y-%m-%d %H:%M:%S')
-    # Reset dry-run tracking for new module.
-    if declare -F ui_dryrun_reset >/dev/null 2>&1; then
-        ui_dryrun_reset
-    fi
     if declare -F ui_log_jsonl >/dev/null 2>&1; then
         ui_log_jsonl "INFO" "$title" "Module started" "started=${ts}"
     fi
@@ -427,32 +310,6 @@ _print_module_start() {
     printf "\n%b── %s ───────────────────────────────────────────────────────────────%b\n" \
         "${bgreen:-}" "$title" "${reset:-}"
     printf "Started: %s\n" "$ts"
-}
-
-# Module end message with timestamp
-# Usage: _print_module_end "OSINT"
-_print_module_end() {
-    local title
-    title=$(printf "%s" "${1:-}" | tr '[:lower:]' '[:upper:]')
-    local ts
-    ts=$(date +'%Y-%m-%d %H:%M:%S')
-    if declare -F ui_log_jsonl >/dev/null 2>&1; then
-        ui_log_jsonl "INFO" "$title" "Module completed" "completed=${ts}"
-    fi
-    if [[ "${OUTPUT_VERBOSITY:-1}" -lt 1 ]] && ! _ui_jsonl_enabled; then
-        return 0
-    fi
-    _ui_human_output_enabled || return 0
-    if declare -F ui_live_progress_end >/dev/null 2>&1; then
-        ui_live_progress_end
-    fi
-
-    # Show dry-run summary before completion timestamp
-    if declare -F ui_dryrun_summary >/dev/null 2>&1; then
-        ui_dryrun_summary
-    fi
-
-    printf "Completed: %s\n" "$ts"
 }
 
 # Section header for major phases (OSINT, Subdomains, Web, Vulns, etc.)
@@ -496,31 +353,16 @@ _print_status() {
         return 0
     fi
 
-    if declare -F ui_count_inc >/dev/null 2>&1; then
-        ui_count_inc "$badge"
-    fi
     if declare -F ui_log_jsonl >/dev/null 2>&1; then
         ui_log_jsonl "$badge" "$text" "Status update" "duration=${duration}" "reason=${reason}"
     fi
     if ! _ui_human_output_enabled; then
-        if [[ "$badge" == "FAIL" ]]; then
-            [[ -z "$reason" ]] && reason="see debug.log"
-            record_incident "FAIL" "$text" "$reason"
-        elif [[ "$badge" == "WARN" ]] && [[ -n "$reason" ]]; then
-            record_incident "WARN" "$text" "$reason"
-        fi
         return 0
     fi
     if [[ "$hide_cache_human" == "true" ]]; then
         return 0
     fi
     print_task "$badge" "$text" "$duration" "$reason"
-    if [[ "$badge" == "FAIL" ]]; then
-        [[ -z "$reason" ]] && reason="see debug.log"
-        record_incident "FAIL" "$text" "$reason"
-    elif [[ "$badge" == "WARN" ]] && [[ -n "$reason" ]]; then
-        record_incident "WARN" "$text" "$reason"
-    fi
 }
 
 # Error that always shows (even in quiet mode)
@@ -533,14 +375,6 @@ _print_error() {
     _ui_human_output_enabled || return 0
     _ui_live_break_if_needed
     printf "%b[FAIL]%b %s\n" "${bred:-}" "${reset:-}" "$msg" >&2
-}
-
-# Thin decorative rule (replaces heavy ###...### separators)
-# Usage: _print_rule
-_print_rule() {
-    [[ "${OUTPUT_VERBOSITY:-1}" -lt 1 ]] && return 0
-    _ui_human_output_enabled || return 0
-    printf "%b──────────────────────────────────────────────────────────────%b\n" "${bgreen:-}" "${reset:-}"
 }
 
 ###############################################################################
@@ -615,34 +449,6 @@ skip_notification() {
 ###############################################################################
 # Command Execution Helpers
 ###############################################################################
-
-# Execute a command with optional dry-run support and logging
-# Usage: run_tool tool_name command [args...]
-# Respects DRY_RUN and LOGFILE variables
-run_tool() {
-    local name="$1"
-    shift
-
-    if [[ ${DRY_RUN:-false} == true ]]; then
-        local full_cmd="$name $*"
-
-        # Track command for module summary
-        if declare -F ui_dryrun_track >/dev/null 2>&1; then
-            ui_dryrun_track "$name" "$full_cmd"
-        else
-            # Fallback to old behavior if ui_dryrun_track not available
-            printf "%b[DRY-RUN] Would execute: %s %s%b\n" "${cyan:-}" "$name" "$*" "${reset:-}"
-        fi
-        return 0
-    fi
-
-    # Log the command if LOGFILE is set
-    if [[ -n "${LOGFILE:-}" ]]; then
-        echo "[$(date +'%Y-%m-%d %H:%M:%S')] Running: $name $*" >> "$LOGFILE"
-    fi
-
-    "$@"
-}
 
 # Remove ANSI/control sequences from a text stream.
 # Usage: some_command | strip_ansi_stream
@@ -734,61 +540,9 @@ run_with_heartbeat() {
     return "$rc"
 }
 
-# Shell-string variant for commands that require complex redirections.
-# Usage: run_with_heartbeat_shell "label" "command string"
-run_with_heartbeat_shell() {
-    local label="${1:-task}"
-    local shell_cmd="${2:-}"
-    if [[ -z "$shell_cmd" ]]; then
-        return 1
-    fi
-    run_with_heartbeat "$label" /bin/bash -lc "$shell_cmd"
-}
-
 ###############################################################################
 # Pipeline Helpers
 ###############################################################################
-
-# Process results: deduplicate, count new entries, and return count
-# Usage: NUMOFLINES=$(process_results input_file output_file)
-process_results() {
-    local input="$1"
-    local output="$2"
-    local count=0
-    
-    if [[ -s "$input" ]]; then
-        if command -v anew &>/dev/null; then
-            count=$(anew "$output" < "$input" 2>/dev/null | sed '/^$/d' | wc -l | tr -d ' ')
-        else
-            # Fallback: no dedup — append all and count non-empty input lines
-            # (may overcount duplicates already present in output)
-            cat "$input" >> "$output" 2>/dev/null
-            count=$(sed '/^$/d' "$input" | wc -l | tr -d ' ')
-        fi
-    fi
-    
-    [[ "$count" =~ ^[0-9]+$ ]] || count=0
-    echo "$count"
-}
-
-# Filter results by domain and process
-# Usage: NUMOFLINES=$(filter_and_process input_file output_file domain)
-filter_and_process() {
-    local input="$1"
-    local output="$2"
-    local domain="$3"
-    local count=0
-    
-    if [[ -s "$input" ]]; then
-        count=$(grep_domain "$input" "$domain" 2>/dev/null \
-            | anew "$output" 2>/dev/null \
-            | sed '/^$/d' \
-            | wc -l | tr -d ' ' || true)
-    fi
-    
-    [[ "$count" =~ ^[0-9]+$ ]] || count=0
-    echo "$count"
-}
 
 ###############################################################################
 # Domain Matching Helpers
@@ -810,95 +564,15 @@ domain_match_regex() {
     printf '(^|\\.)%s$' "$escaped"
 }
 
-# Grep lines matching a domain (as subdomain or exact match) with proper escaping
-# Usage: grep_domain input_file domain [extra_grep_flags...]
-# Matches: "*.domain" and "domain" exactly (anchored)
-grep_domain() {
-    local input="$1"
-    local raw_domain="$2"
-    shift 2
-    local pattern
-    pattern=$(domain_match_regex "$raw_domain")
-    grep "$@" -E "$pattern" "$input"
-}
-
 ###############################################################################
 # Axiom/Local Execution Helper
 ###############################################################################
-
-# Run a tool command, automatically choosing between local and axiom-scan
-# Usage: run_scan <input_file> <output_file> <tool_name> [tool_args...]
-# Example: run_scan .tmp/input.txt .tmp/output.txt subfinder -silent
-# With AXIOM: axiom-scan input -m tool args -o output $AXIOM_EXTRA_ARGS
-# Without:    tool args < input > output (or with -o flag)
-run_scan() {
-    local input="$1"
-    local output="$2"
-    local tool="$3"
-    shift 3
-
-    if [[ ${AXIOM:-false} == true ]]; then
-        axiom-scan "$input" -m "$tool" "$@" -o "$output" $AXIOM_EXTRA_ARGS 2>>"$LOGFILE" >/dev/null
-    else
-        "$tool" "$@" -o "$output" <"$input" 2>>"$LOGFILE" >/dev/null
-    fi
-}
 
 ###############################################################################
 # Function Gate Helper
 ###############################################################################
 
-# Check if a function should run based on its flag and checkpoint
-# Usage: if should_run "FLAG_VAR_NAME"; then ... fi
-# Replaces the repeated pattern:
-#   if { [[ ! -f "$called_fn_dir/.${FUNCNAME[0]}" ]] || [[ $DIFF == true ]]; } && [[ $FLAG == true ]]; then
-should_run() {
-    local flag_var="$1"
-    local func_name="${FUNCNAME[1]:-unknown}"
-    local checkpoint_file="${called_fn_dir:-.}/.${func_name}"
-
-    # Check if feature flag is enabled
-    if [[ "${!flag_var:-false}" != true ]]; then
-        return 1
-    fi
-
-    # Check if already processed (unless DIFF mode)
-    if [[ -f "$checkpoint_file" ]] && [[ ${DIFF:-false} != true ]]; then
-        return 1
-    fi
-
-    return 0
-}
-
 ###############################################################################
 # Validation Helpers
 ###############################################################################
 
-# Check if we should run a function (not already processed or DIFF mode)
-# Usage: if should_run_function; then ... fi
-should_run_function() {
-    local func_name="${FUNCNAME[1]:-unknown}"
-    local checkpoint_file="${called_fn_dir:-.}/.${func_name}"
-    
-    # Run if checkpoint doesn't exist or we're in DIFF mode
-    [[ ! -f "$checkpoint_file" ]] || [[ ${DIFF:-false} == true ]]
-}
-
-# Standard function gate check - combines enabled check with checkpoint
-# Usage: if ! gate_function ENABLED_VAR; then skip_notification "disabled"; return; fi
-gate_function() {
-    local enabled_var="$1"
-    local func_name="${FUNCNAME[1]:-unknown}"
-    
-    # Check if the feature is enabled
-    if [[ "${!enabled_var:-false}" != true ]]; then
-        return 1
-    fi
-    
-    # Check if already processed (unless DIFF mode)
-    if ! should_run_function; then
-        return 1
-    fi
-    
-    return 0
-}

@@ -1,7 +1,7 @@
 #!/bin/bash
 # subenum - Core framework module (trimmed from reconFTW modules/core.sh)
-# Contains: secret redaction, banner, tools check, logging, notifications,
-#           lifecycle (start_func/end_func), check_inscope
+# Contains: banner, tools check, logging, notifications,
+#           lifecycle (start_subfunc/end_subfunc), check_inscope
 # This file is sourced by subenum.sh - do not execute directly
 
 # shellcheck disable=SC2154  # Variables defined in subenum.cfg
@@ -16,36 +16,6 @@ pt_header() { :; }
 
 # Ensure a safe default for early log redirections
 : "${LOGFILE:=/dev/null}"
-
-# Values (not names) registered at runtime from config files or CLI parsing.
-REGISTERED_SECRETS=()
-
-# register_secret(): Adds a raw secret VALUE to REGISTERED_SECRETS.
-function register_secret() {
-    local value="$1"
-    [[ -z "$value" || ${#value} -le 4 ]] && return 0
-
-    local existing
-    for existing in "${REGISTERED_SECRETS[@]}"; do
-        [[ "$existing" == "$value" ]] && return 0
-    done
-    REGISTERED_SECRETS+=("$value")
-}
-
-# redact_secrets(): Redacts registered secrets from a string.
-function redact_secrets() {
-    local text="$1"
-    local redacted="$text"
-    local secret
-
-    for secret in "${REGISTERED_SECRETS[@]}"; do
-        if [[ -n "$secret" && ${#secret} -gt 4 ]]; then
-            redacted="${redacted//$secret/[REDACTED]}"
-        fi
-    done
-
-    echo "$redacted"
-}
 
 ###############################################################################################################
 ################################################### BANNER ####################################################
@@ -256,14 +226,7 @@ function enable_command_trace() {
         exec {TRACE_FD}>&- 2>/dev/null || true
     fi
 
-    if ! exec {TRACE_FD}> >(
-        while IFS= read -r line; do
-            if declare -F redact_secrets >/dev/null 2>&1; then
-                line=$(redact_secrets "$line")
-            fi
-            printf '%s\n' "$line"
-        done >>"$LOGFILE"
-    ); then
+    if ! exec {TRACE_FD}>>"$LOGFILE"; then
         return
     fi
     export BASH_XTRACEFD=$TRACE_FD
@@ -308,171 +271,12 @@ function notification() {
         fi
 
         print_notice "$level" "${FUNCNAME[1]:-notice}" "$1"
-        if [[ "$level" == "WARN" || "$level" == "FAIL" ]]; then
-            record_incident "$level" "${FUNCNAME[1]:-notice}" "$1"
-        fi
     fi
 }
 
 ###############################################################################################################
 ####################################### LIFECYCLE #############################################################
 ###############################################################################################################
-
-function record_func_timing() {
-    local fn="$1"
-    local dur="$2"
-    FUNC_TIMINGS["$fn"]=$dur 2>/dev/null || true
-}
-
-declare -A FUNC_TIMINGS 2>/dev/null || true
-
-function print_timing_summary() {
-    [[ "${OUTPUT_VERBOSITY:-1}" -lt 2 ]] && return 0
-    if [[ ${#FUNC_TIMINGS[@]} -eq 0 ]] 2>/dev/null; then
-        return 0
-    fi
-
-    printf "\n"
-    _print_rule
-    printf "%b[%s] Performance Timing Summary%b\n\n" "${bblue:-}" "$(date +'%Y-%m-%d %H:%M:%S')" "${reset:-}"
-
-    local total=0
-    local fn dur
-    local -a sorted_entries=()
-
-    for fn in "${!FUNC_TIMINGS[@]}"; do
-        dur=${FUNC_TIMINGS[$fn]}
-        if [[ "$dur" =~ ^[0-9]+$ ]]; then
-            total=$((total + dur))
-            sorted_entries+=("$(printf "%08d %s" "$dur" "$fn")")
-        fi
-    done
-
-    local entry
-    while IFS= read -r entry; do
-        [[ -z "$entry" ]] && continue
-        dur="${entry%% *}"
-        fn="${entry#* }"
-        dur=$((10#$dur))
-        printf "  %-28s %6s\n" "$fn" "$(format_duration "$dur")"
-    done < <(printf '%s\n' "${sorted_entries[@]}" | sort -r)
-
-    printf "  %-28s %6s\n" "TOTAL" "$(format_duration "$total")"
-    printf "\n"
-}
-
-# Usage: start_func <name> <description>
-function start_func() {
-    _check_disk_mid_run || _abort_disk_full
-    local current_date
-    current_date=$(date +'%Y-%m-%d %H:%M:%S')
-    echo "[$current_date] Start function: ${1} " >>"${LOGFILE}"
-    local _fn_name="${1}"
-    printf -v "_start_time_${_fn_name//[^a-zA-Z0-9_]/_}" '%s' "$(date +%s)"
-    start=$(date +%s)
-    if [[ -n "${called_fn_dir:-}" ]] && [[ "${DRY_RUN:-false}" != "true" ]]; then
-        touch "$called_fn_dir/.inprogress_${1}" 2>/dev/null || true
-    fi
-    log_json "INFO" "${1}" "Function started" "description=${2}"
-    if declare -F ui_log_jsonl >/dev/null 2>&1; then
-        ui_log_jsonl "INFO" "${1}" "Function started" "description=${2}"
-    fi
-    if [[ "${OUTPUT_VERBOSITY:-1}" -ge 2 ]]; then
-        _print_msg "INFO" "Running ${1}..."
-    fi
-}
-
-# Usage: end_func <message> <func> [status]
-function end_func() {
-    local message="${1:-}"
-    local fn="${2:-${FUNCNAME[1]:-unknown}}"
-    local status="${3:-}"
-
-    if [[ -n "$status" ]]; then
-        case "$status" in
-            info|warn|error|good|OK|WARN|FAIL|SKIP|SKIP_CONFIG|SKIP_NOINPUT|CACHE_HIT)
-                ;;
-            *)
-                status="OK"
-                ;;
-        esac
-    else
-        case "$fn" in
-            info|warn|error|good|OK|WARN|FAIL|SKIP|SKIP_CONFIG|SKIP_NOINPUT|CACHE_HIT)
-                status="$fn"
-                fn="${FUNCNAME[1]:-unknown}"
-                ;;
-            *)
-                status="OK"
-                ;;
-        esac
-    fi
-
-    if [[ -n "${called_fn_dir:-}" ]] && [[ "${DRY_RUN:-false}" != "true" ]]; then
-        rm -f "$called_fn_dir/.inprogress_${fn}" 2>/dev/null || true
-        touch "$called_fn_dir/.${fn}" 2>/dev/null || true
-    fi
-    local end
-    end=$(date +%s)
-    local _start_var="_start_time_${fn//[^a-zA-Z0-9_]/_}"
-    local _fn_start="${!_start_var:-$start}"
-    local runtime=""
-    getElapsedTime "$_fn_start" "$end"
-    record_func_timing "${fn}" "$((end - _fn_start))"
-    local duration=$((end - _fn_start))
-    local end_date
-    end_date=$(date +'%Y-%m-%d %H:%M:%S')
-    echo "[$end_date] End function: ${fn} " >>"${LOGFILE}"
-    local badge="OK"
-    local reason_code=""
-    case "$status" in
-        info|INFO) badge="INFO" ;;
-        warn|WARN) badge="WARN" ;;
-        error|ERROR) badge="FAIL" ;;
-        good|SUCCESS) badge="OK" ;;
-        OK|FAIL|SKIP|CACHE) badge="$status" ;;
-        SKIP_CONFIG) badge="SKIP"; reason_code="config" ;;
-        SKIP_NOINPUT) badge="SKIP"; reason_code="noinput" ;;
-        CACHE_HIT) badge="CACHE"; reason_code="cache" ;;
-    esac
-
-    if [[ "$badge" == "OK" ]] && [[ -n "$message" ]]; then
-        local msg_lc
-        msg_lc=$(printf "%s" "$message" | tr '[:upper:]' '[:lower:]')
-        if [[ "$msg_lc" == no\ * ]] && [[ "$msg_lc" == *"skip"* ]]; then
-            badge="SKIP"
-            reason_code="noinput"
-        fi
-    fi
-
-    if [[ -n "${called_fn_dir:-}" ]]; then
-        printf "%s\n" "$badge" >"${called_fn_dir}/.status_${fn}" 2>/dev/null || true
-        if [[ -n "$reason_code" ]]; then
-            printf "%s\n" "$reason_code" >"${called_fn_dir}/.status_reason_${fn}" 2>/dev/null || true
-        fi
-    fi
-
-    if [[ "${OUTPUT_VERBOSITY:-1}" -ge 1 ]]; then
-        _print_status "$badge" "${fn}" "${duration}s"
-        if [[ -n "$reason_code" ]] && { [[ "$badge" != "CACHE" ]] || [[ "${SHOW_CACHE:-false}" == "true" ]]; }; then
-            printf "         reason: %s\n" "$reason_code"
-        fi
-        if [[ -n "$message" ]] && [[ "$badge" != "OK" && "$badge" != "INFO" ]]; then
-            printf "         %s\n" "$message"
-            if [[ "$badge" == "FAIL" || "$badge" == "WARN" ]]; then
-                record_incident "$badge" "$fn" "$message"
-            fi
-        fi
-    fi
-    log_json "SUCCESS" "${fn}" "Function completed" "runtime=${runtime}" "duration_sec=${duration}"
-    if declare -F ui_log_jsonl >/dev/null 2>&1; then
-        ui_log_jsonl "SUCCESS" "${fn}" "Function completed" "runtime=${runtime}" "duration_sec=${duration}"
-    fi
-
-    _check_disk_mid_run || _abort_disk_full
-
-    :
-}
 
 function start_subfunc() {
     current_date=$(date +'%Y-%m-%d %H:%M:%S')
@@ -530,15 +334,3 @@ function end_subfunc() {
 function check_inscope() {
     cat "$1" | inscope >"${1}_tmp" && cp "${1}_tmp" "$1" && rm -f "${1}_tmp"
 }
-
-function remove_big_files() {
-    rm -rf .tmp/gotator*.txt 2>>"${LOGFILE}"
-    rm -rf .tmp/brute_recursive_wordlist.txt 2>>"$LOGFILE"
-    rm -rf .tmp/subs_no_resolved.txt .tmp/subdomains_dns.txt .tmp/passive_recursive.txt .tmp/gotator1_recursive.txt .tmp/gotator2_recursive.txt 2>>"$LOGFILE"
-    find .tmp -type f -size +200M -exec rm -f {} + 2>>"$LOGFILE"
-}
-
-# Asset store helpers are no-ops in subenum (output contract is subdomains/ only).
-function append_asset() { :; }
-function append_assets_from_file() { :; }
-function plugins_emit() { :; }

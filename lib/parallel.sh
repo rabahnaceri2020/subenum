@@ -23,24 +23,6 @@ PARALLEL_TRACE_SLOW_SECONDS="${PARALLEL_TRACE_SLOW_SECONDS:-30}"
 declare -a _PARALLEL_PIDS=()
 _PARALLEL_LAST_BADGE=""
 
-###############################################################################
-# Background-job throttle used by modules/{web,vulns,osint}.sh to parallelise
-# per-target loops that replaced `interlace -c` (removed in the Naxus audit
-# fix for command injection). Each iteration launches a subshell in the
-# background; this helper blocks until the running-job count falls below the
-# requested cap. Requires bash 4.3+ for `wait -n`.
-###############################################################################
-_throttle_jobs() {
-    local max="${1:-4}"
-    # Clamp to sane minimum so a misconfigured var doesn't busy-spawn.
-    [[ "$max" =~ ^[0-9]+$ ]] || max=4
-    (( max < 1 )) && max=1
-
-    while (( $(jobs -rp | wc -l) >= max )); do
-        wait -n 2>/dev/null || break
-    done
-}
-
 # Recursively signal a process and all its descendants. Used by
 # _timeout_kill_job to kill the actual external tool (puredns, dnsx, ffuf,
 # axiom-scan, etc.) inside the parallel_funcs wrapper subshell, not just
@@ -69,7 +51,7 @@ function _kill_tree() {
 # Usage: _timeout_kill_job <pid> <func_name> <duration_sec>
 # Sends SIGTERM, polls every second up to PARALLEL_KILL_GRACE_SECONDS, then SIGKILL
 # if still alive. Persists FAIL + reason=timeout to the same .status_<fn> /
-# .status_reason_<fn> files end_func writes, so _parallel_emit_job_output renders
+# .status_reason_<fn> files end_subfunc writes, so _parallel_emit_job_output renders
 # the timeout reason on the FAIL badge without any schema extension.
 # Uses 'function' keyword per CONVENTIONS.md §Function Naming; sibling helpers in
 # this file that omit it predate the rule and are a Phase 5 DOCS-01 followup, not
@@ -309,9 +291,6 @@ _parallel_emit_job_output() {
     case "$mode" in
         summary)
             if [[ "$_force_print" == true ]]; then
-                if declare -F ui_count_inc >/dev/null 2>&1; then
-                    ui_count_inc "$badge"
-                fi
                 (OUTPUT_VERBOSITY=1; print_task "$badge" "$func_name" "$duration" "")
             else
                 _print_status "$badge" "$func_name" "${duration}s"
@@ -329,9 +308,6 @@ _parallel_emit_job_output() {
             local show_lines="$tail_lines"
             [[ "$rc" -ne 0 ]] && show_lines=$((tail_lines * 2))
             if [[ "$_force_print" == true ]]; then
-                if declare -F ui_count_inc >/dev/null 2>&1; then
-                    ui_count_inc "$badge"
-                fi
                 (OUTPUT_VERBOSITY=1; print_task "$badge" "$func_name" "$duration" "")
             else
                 _print_status "$badge" "$func_name" "${duration}s"
@@ -345,9 +321,6 @@ _parallel_emit_job_output() {
             ;;
         full)
             if [[ "$_force_print" == true ]]; then
-                if declare -F ui_count_inc >/dev/null 2>&1; then
-                    ui_count_inc "$badge"
-                fi
                 (OUTPUT_VERBOSITY=1; print_task "$badge" "$func_name" "$duration" "")
             else
                 _print_status "$badge" "$func_name" "${duration}s"
@@ -715,232 +688,21 @@ parallel_funcs() {
     return $failed
 }
 
-# Run functions in groups (batch parallelization)
-# Usage: parallel_batch group_size func1 func2 func3 ...
-# Example: parallel_batch 3 func1 func2 func3 func4 func5
-# Runs func1,func2,func3 in parallel, waits, then func4,func5
-parallel_batch() {
-    local batch_size="${1:-3}"
-    shift
-    
-    local -a batch=()
-    local func
-    
-    for func in "$@"; do
-        batch+=("$func")
-        
-        if ((${#batch[@]} >= batch_size)); then
-            parallel_funcs "$batch_size" "${batch[@]}"
-            batch=()
-        fi
-    done
-    
-    # Run remaining functions
-    if ((${#batch[@]} > 0)); then
-        parallel_funcs "${#batch[@]}" "${batch[@]}"
-    fi
-}
-
 ###############################################################################
 # Job Control Helpers
 ###############################################################################
-
-# Wait for all background jobs with timeout
-# Usage: wait_for_jobs [timeout_seconds]
-wait_for_jobs() {
-    local timeout="${1:-0}"
-    local start_time
-    start_time=$(date +%s)
-    
-    while jobs -p | grep -q .; do
-        if ((timeout > 0)); then
-            local elapsed
-            elapsed=$(($(date +%s) - start_time))
-            if ((elapsed >= timeout)); then
-                print_warnf "Timeout reached, killing remaining jobs"
-                jobs -p | xargs -r kill 2>/dev/null || true
-                return 1
-            fi
-        fi
-        sleep 1
-    done
-    
-    return 0
-}
-
-# Get count of running background jobs
-# Usage: running_jobs=$(get_running_jobs)
-get_running_jobs() {
-    jobs -p | wc -l | tr -d ' '
-}
-
-# Kill all tracked parallel jobs (for cleanup)
-# Usage: cleanup_parallel_jobs
-cleanup_parallel_jobs() {
-    local pid
-    for pid in "${_PARALLEL_PIDS[@]}"; do
-        if kill -0 "$pid" 2>/dev/null; then
-            kill "$pid" 2>/dev/null || true
-        fi
-    done
-    _PARALLEL_PIDS=()
-}
 
 ###############################################################################
 # Subdomain Enumeration Parallelization
 ###############################################################################
 
-# Run passive subdomain enumeration in parallel
-# Usage: parallel_passive_enum
-# Runs: sub_passive, sub_crt in parallel (sources that don't need resolved subs)
-parallel_passive_enum() {
-    local funcs=(
-        "sub_passive"
-        "sub_crt"
-    )
-
-    if [[ "${OUTPUT_VERBOSITY:-1}" -ge 2 ]]; then
-        printf "%b[*] Running passive enumeration in parallel (%d functions)%b\n" \
-            "${bblue:-}" "${#funcs[@]}" "${reset:-}"
-    fi
-
-    parallel_funcs "${PAR_SUB_PASSIVE_GROUP_SIZE:-2}" "${funcs[@]}"
-}
-
-# Run active subdomain enumeration in parallel
-# Usage: parallel_active_enum
-# Runs: sub_active, sub_noerror, sub_dns in parallel
-parallel_active_enum() {
-    local funcs=(
-        "sub_active"
-        "sub_noerror"
-        "sub_dns"
-    )
-
-    if [[ "${OUTPUT_VERBOSITY:-1}" -ge 2 ]]; then
-        printf "%b[*] Running active enumeration in parallel (%d functions)%b\n" \
-            "${bblue:-}" "${#funcs[@]}" "${reset:-}"
-    fi
-
-    parallel_funcs "${PAR_SUB_DEP_ACTIVE_GROUP_SIZE:-3}" "${funcs[@]}"
-}
-
-# Run brute force enumeration sequentially (resource usage and shared artifacts)
-# Usage: parallel_brute_enum
-parallel_brute_enum() {
-    local funcs=(
-        "sub_brute"
-        "sub_permut"
-        "sub_regex_permut"
-        "sub_ia_permut"
-    )
-
-    # Kept for compatibility with existing helper-based orchestrators.
-    # Brute force/permutation stages should not run concurrently.
-    if [[ "${OUTPUT_VERBOSITY:-1}" -ge 2 ]]; then
-        printf "%b[*] Running brute force enumeration sequentially%b\n" \
-            "${bblue:-}" "${reset:-}"
-    fi
-
-    local func rc failed=0
-    for func in "${funcs[@]}"; do
-        if ! declare -f "$func" >/dev/null 2>&1; then
-            print_warnf "Function %s not found, skipping" "$func"
-            continue
-        fi
-
-        "$func"
-        rc=$?
-        if ((rc > 0)); then
-            if [[ "${CONTINUE_ON_TOOL_ERROR:-true}" == "true" ]]; then
-                print_warnf "Brute phase function %s failed (rc=%d); continuing" "$func" "$rc"
-                ((failed++)) || true
-            else
-                print_errorf "Brute phase function %s failed (rc=%d)" "$func" "$rc"
-                return 1
-            fi
-        fi
-    done
-
-    return "$failed"
-}
-
 ###############################################################################
 # Vulnerability Scanning Parallelization
 ###############################################################################
 
-# Run web vulnerability checks in parallel
-# Usage: parallel_web_vulns
-parallel_web_vulns() {
-    local funcs=(
-        "crlf_checks"
-        "xss"
-    )
-    
-    if [[ "${OUTPUT_VERBOSITY:-1}" -ge 2 ]]; then
-        printf "%b[*] Running web vulnerability checks in parallel (%d checks)%b\n" \
-            "${bblue:-}" "${#funcs[@]}" "${reset:-}"
-    fi
-
-    parallel_funcs "${PAR_VULNS_GROUP1_SIZE:-4}" "${funcs[@]}"
-}
-
-# Run injection vulnerability checks in parallel
-# Usage: parallel_injection_vulns
-parallel_injection_vulns() {
-    local funcs=(
-        "sqli"
-        "ssti"
-        "lfi"
-        "command_injection"
-    )
-    
-    if [[ "${OUTPUT_VERBOSITY:-1}" -ge 2 ]]; then
-        printf "%b[*] Running injection vulnerability checks in parallel (%d checks)%b\n" \
-            "${bblue:-}" "${#funcs[@]}" "${reset:-}"
-    fi
-
-    parallel_funcs "${PAR_VULNS_GROUP2_SIZE:-4}" "${funcs[@]}"
-}
-
-# Run server-side vulnerability checks in parallel
-# Usage: parallel_server_vulns
-parallel_server_vulns() {
-    local funcs=(
-        "ssrf_checks"
-        "lfi"
-    )
-    
-    if [[ "${OUTPUT_VERBOSITY:-1}" -ge 2 ]]; then
-        printf "%b[*] Running server-side vulnerability checks in parallel (%d checks)%b\n" \
-            "${bblue:-}" "${#funcs[@]}" "${reset:-}"
-    fi
-
-    parallel_funcs "${PAR_VULNS_GROUP1_SIZE:-4}" "${funcs[@]}"
-}
-
 ###############################################################################
 # OSINT Parallelization
 ###############################################################################
-
-# Run OSINT gathering in parallel
-# Usage: parallel_osint
-parallel_osint() {
-    local funcs=(
-        "google_dorks"
-        "github_dorks"
-        "metadata"
-        "emails"
-        "domain_info"
-    )
-    
-    if [[ "${OUTPUT_VERBOSITY:-1}" -ge 2 ]]; then
-        printf "%b[*] Running OSINT gathering in parallel (%d sources)%b\n" \
-            "${bblue:-}" "${#funcs[@]}" "${reset:-}"
-    fi
-
-    parallel_funcs "${PAR_OSINT_GROUP1_SIZE:-4}" "${funcs[@]}"
-}
 
 ###############################################################################
 # Full Pipeline Parallelization

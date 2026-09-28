@@ -71,13 +71,6 @@ function resolvers_update() {
     fi
 }
 
-function resolvers_update_quick_local() {
-    if [[ $update_resolvers == true ]]; then
-        cached_download_typed "${resolvers_url}" "$resolvers" "resolvers.txt" "resolvers"
-        cached_download_typed "${resolvers_trusted_url}" "$resolvers_trusted" "resolvers_trusted.txt" "resolvers"
-    fi
-}
-
 function resolvers_optimize_local() {
     # Experimental: dedupe resolvers
     sort -u "$resolvers" -o "$resolvers" 2>/dev/null || true

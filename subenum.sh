@@ -13,19 +13,6 @@ set -E
 set +e
 IFS=$'\n\t'
 
-# Standard exit/return codes (guard for re-source in test harnesses)
-if [[ -z "${E_SUCCESS+x}" ]]; then
-    readonly E_SUCCESS=0
-    readonly E_GENERAL=1
-    readonly E_MISSING_DEP=2
-    readonly E_INVALID_INPUT=3
-    readonly E_NETWORK=4
-    readonly E_DISK_SPACE=5
-    readonly E_PERMISSION=6
-    readonly E_TIMEOUT=7
-    readonly E_CONFIG=8
-fi
-
 # Detect if the script is being run (not sourced) in macOS and re-exec with modern Bash.
 if [[ "${BASH_SOURCE[0]}" == "${0}" && $OSTYPE == "darwin"* ]]; then
     _mac_bash=""
@@ -417,13 +404,6 @@ if [[ -n $rate_limit ]]; then
     DNSX_RATE_LIMIT=$rate_limit
 fi
 
-# Root/sudo detection (used by the installer; kept for parity)
-if [[ $(id -u | grep -o '^0$') == "0" ]]; then
-    SUDO=""
-else
-    SUDO="sudo"
-fi
-
 # Resolve output root
 if [[ -z "$OUTPUT_ROOT" ]]; then
     OUTPUT_ROOT="${SCRIPTPATH}/Recon"
@@ -593,8 +573,6 @@ subenum_target() {
         printf "\n"
     fi
     notification "Finished subdomain enumeration on: ${domain} (${TOTAL_SUBS:-0} subdomains, ${NEW_SUBS:-0} new) in: ${runtime}" good "$(date +'%Y-%m-%d %H:%M:%S')"
-
-    print_timing_summary
 
     _RECON_CLEAN_EXIT=true
     cd "${startdir}" 2>/dev/null || cd "$SCRIPTPATH" || true
