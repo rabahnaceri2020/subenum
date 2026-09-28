@@ -117,8 +117,7 @@ function help() {
     printf " %bMETHODS (for --only)%b\n" "${bblue:-}" "${reset:-}"
     printf "   sub_passive, sub_crt, sub_active, sub_tls, sub_noerror, sub_srv, sub_dns,\n"
     printf "   sub_brute, sub_permut, sub_regex_permut, sub_ia_permut,\n"
-    printf "   sub_recursive_passive, sub_recursive_brute,\n"
-    printf "   sub_ns_delegation, zonetransfer\n"
+    printf "   sub_recursive_passive, sub_recursive_brute, sub_ns_delegation\n"
     printf " \n"
     printf " %bOUTPUT%b\n" "${bblue:-}" "${reset:-}"
     printf "   <output-root>/<domain>/subdomains/subdomains.txt      All discovered subdomains\n"
@@ -451,7 +450,6 @@ apply_only_selection() {
         [sub_recursive_passive]=SUB_RECURSIVE_PASSIVE
         [sub_recursive_brute]=SUB_RECURSIVE_BRUTE
         [sub_ns_delegation]=NS_DELEGATION
-        [zonetransfer]=ZONETRANSFER
     )
     local flag m
     for flag in "${!only_map[@]}"; do
@@ -576,17 +574,6 @@ subenum_target() {
 
     _print_section "Subdomains"
     subdomains_full
-
-    # Zone transfer is an additional enumeration source; run it before final summary.
-    zonetransfer
-
-    # Recompute the "new since previous run" delta so zone-transfer hits are included.
-    if [[ -s ".tmp/subdomains_old.txt" ]]; then
-        comm -13 <(sort -u ".tmp/subdomains_old.txt") <(sort -u "subdomains/subdomains.txt" 2>/dev/null) \
-            | sed '/^$/d' >"subdomains/subdomains_new.txt" 2>/dev/null || true
-    else
-        cp "subdomains/subdomains.txt" "subdomains/subdomains_new.txt" 2>/dev/null || true
-    fi
 
     # Final summary
     local TOTAL_SUBS NEW_SUBS

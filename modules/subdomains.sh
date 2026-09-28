@@ -19,7 +19,6 @@
 #   sub_ia_permut         Permutations by AI analysis (subwiz)
 #   sub_recursive_passive Recursive passive enumeration (dsieve + subfinder)
 #   sub_recursive_brute   Recursive brute force + permutations
-#   zonetransfer          Zone transfer check (dig AXFR)
 #
 # Helpers: deep_wildcard_filter, _is_sensitive_domain
 # This file is sourced by subenum.sh - do not execute directly
@@ -926,7 +925,7 @@ function sub_ns_delegation() {
         while IFS= read -r line; do
             local sub ns_raw
             sub=$(echo "$line" | awk '{print $1}')
-            # Skip the base domain itself (already checked by zonetransfer())
+            # Skip the base domain itself
             [[ "$sub" == "$domain" ]] && continue
             # Extract NS hostnames from the bracketed response
             ns_raw=$(echo "$line" | grep -aoE '[a-zA-Z0-9][-a-zA-Z0-9]*(\.[a-zA-Z0-9][-a-zA-Z0-9]*)+' | tail -n +2)
@@ -1438,58 +1437,3 @@ function sub_recursive_brute() {
     fi
 }
 
-function zonetransfer() {
-
-    # Create necessary directories
-    if ! mkdir -p subdomains; then
-        print_warnf "Failed to create subdomains directory."
-        return 1
-    fi
-
-    # Check if the function should run
-    if { [[ ! -f "$called_fn_dir/.${FUNCNAME[0]}" ]] || [[ $DIFF == true ]]; } && [[ $ZONETRANSFER == true ]] && ! [[ $domain =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-        start_func "${FUNCNAME[0]}" "Zone transfer check"
-
-        # Initialize output file
-        if ! : >"subdomains/zonetransfer.txt"; then
-            print_warnf "Failed to create zonetransfer.txt."
-            return 1
-        fi
-
-        # Perform zone transfer check
-        for ns in $(run_command dig +short ns "$domain" 2>/dev/null); do
-            run_command dig +time=3 +tries=1 axfr "${domain}" @"$ns" 2>>"$LOGFILE" | tee -a "subdomains/zonetransfer.txt" >/dev/null
-        done
-
-        # Check if zone transfer was successful and harvest hostnames
-        NUMOFLINES=0
-        if [[ -s "subdomains/zonetransfer.txt" ]]; then
-            if ! grep -q "Transfer failed" "subdomains/zonetransfer.txt"; then
-                notification "Zone transfer found on ${domain}!" "info"
-
-                grep -E '^([a-zA-Z0-9][-a-zA-Z0-9]*\.)+[a-zA-Z]{2,}' subdomains/zonetransfer.txt \
-                    | awk '{print $1}' \
-                    | sed -e 's/\.$//' -e '/^$/d' \
-                    | grep -E "$DOMAIN_MATCH_REGEX" \
-                    | sort -u >.tmp/zonetransfer_hosts.txt || true
-
-                if [[ -s ".tmp/zonetransfer_hosts.txt" ]]; then
-                    NUMOFLINES=$(anew subdomains/subdomains.txt <.tmp/zonetransfer_hosts.txt | sed '/^$/d' | wc -l | tr -d ' ' || true)
-                    [[ "$NUMOFLINES" =~ ^[0-9]+$ ]] || NUMOFLINES=0
-                fi
-            fi
-        fi
-
-        end_func "${NUMOFLINES} new subs (zone transfer). Results are saved in subdomains/zonetransfer.txt" "${FUNCNAME[0]}"
-
-    else
-        if [[ $ZONETRANSFER == false ]]; then
-            skip_notification "disabled"
-        elif [[ $domain =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            skip_notification "noinput"
-        else
-            skip_notification "processed"
-        fi
-    fi
-
-}
