@@ -15,6 +15,9 @@ SUBENUM_OPTS=""
 # heartbeat while a step runs (seconds); override with HEARTBEAT_INTERVAL=10
 HEARTBEAT_INTERVAL="${HEARTBEAT_INTERVAL:-30}"
 
+# run `git pull` in the subenum repo after the domain loop finishes
+GIT_PULL_AFTER_RUN=true
+
 # httpx
 HTTPX_TIMEOUT=5
 HTTPX_EXTRA_OPTS="-sc -title -wc -nc"
@@ -200,3 +203,15 @@ for domain in $(cat "$DOMAIN_LIST"); do
         fi
     fi
 done
+
+# Pull the latest subenum changes after the run
+if [[ "$GIT_PULL_AFTER_RUN" == "true" ]]; then
+    if git -C "$BASE" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        log "Pulling latest changes (git pull)..."
+        if ! git -C "$BASE" pull; then
+            log "git pull failed - run it manually in $BASE"
+        fi
+    else
+        log "Skipping git pull ($BASE is not a git repository)"
+    fi
+fi
