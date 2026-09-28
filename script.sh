@@ -84,6 +84,13 @@ fi
 
 log "Target list: $DOMAIN_LIST"
 
+# Make sure the brute wordlist exists (the vendored .gz is expanded on first run)
+WORDLIST_FILE="$BASE/resources/wordlists/subdomains.txt"
+if [[ ! -s "$WORDLIST_FILE" && -s "${WORDLIST_FILE}.gz" ]]; then
+    log "Expanding subdomains wordlist (first run)..."
+    gzip -dc "${WORDLIST_FILE}.gz" > "$WORDLIST_FILE"
+fi
+
 for domain in $(cat "$DOMAIN_LIST"); do
     log "Working on $domain"
 

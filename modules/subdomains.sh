@@ -173,6 +173,31 @@ _is_sensitive_domain() {
     return 1
 }
 
+# Cap the subdomain list fed to enrichment methods (non-DEEP) so big targets
+# stay fast. Prints the (possibly truncated) list to stdout.
+_enrich_input() {
+    local file="$1"
+    local max="${ENRICH_MAX_SUBS:-3000}"
+    [[ "$max" =~ ^[0-9]+$ ]] || max=3000
+    if [[ "${DEEP:-false}" == true ]] || (( max == 0 )); then
+        cat "$file"
+    else
+        head -n "$max" "$file"
+    fi
+}
+
+# Run a command through run_command with an optional hard timeout.
+# Usage: _run_timed_command <timeout> <cmd> [args...]
+_run_timed_command() {
+    local t="$1"
+    shift
+    if [[ -n "${TIMEOUT_CMD:-}" ]] && [[ -n "$t" ]] && [[ "$t" != "0" ]]; then
+        run_command "$TIMEOUT_CMD" -k 10s "$t" "$@"
+    else
+        run_command "$@"
+    fi
+}
+
 # Initialize subdomain enumeration environment
 # Usage: _subdomains_init
 _subdomains_init() {
@@ -553,11 +578,12 @@ function sub_tls() {
         : >".tmp/subdomains_tlsx_clean.txt"
         : >".tmp/subdomains_tlsx_resolved.txt"
 
+        print_notice RUN "sub_tls" "grabbing TLS certificates"
         if [[ $DEEP == true ]]; then
-            cat subdomains/subdomains.txt | run_command tlsx -san -cn -silent -ro -c "$TLSX_THREADS" \
+            _enrich_input subdomains/subdomains.txt | _run_timed_command "${TLS_ENUM_TIMEOUT:-5m}" tlsx -san -cn -silent -ro -c "$TLSX_THREADS" \
                 -p "$TLS_PORTS" -o .tmp/subdomains_tlsx.txt 2>>"$LOGFILE" >/dev/null
         else
-            cat subdomains/subdomains.txt | run_command tlsx -san -cn -silent -ro -c "$TLSX_THREADS" >.tmp/subdomains_tlsx.txt 2>>"$LOGFILE"
+            _enrich_input subdomains/subdomains.txt | _run_timed_command "${TLS_ENUM_TIMEOUT:-5m}" tlsx -san -cn -silent -ro -c "$TLSX_THREADS" >.tmp/subdomains_tlsx.txt 2>>"$LOGFILE"
         fi
 
         if [[ -s ".tmp/subdomains_tlsx.txt" ]]; then
@@ -729,8 +755,9 @@ function sub_dns() {
 
         if [[ -s "subdomains/subdomains.txt" ]]; then
             print_notice RUN "sub_dns" "collecting DNS records (dnsx -recon)"
-            run_command dnsx -r "$resolvers_trusted" -recon -silent -retry 3 -json \
-                -o "subdomains/subdomains_dnsregs.json" <"subdomains/subdomains.txt" 2>>"$LOGFILE" >/dev/null
+            _enrich_input subdomains/subdomains.txt | _run_timed_command "${DNS_RECON_TIMEOUT:-5m}" \
+                dnsx -r "$resolvers_trusted" -recon -silent -retry 3 -json \
+                -o "subdomains/subdomains_dnsregs.json" 2>>"$LOGFILE" >/dev/null
         fi
         if [[ -s "subdomains/subdomains_dnsregs.json" ]]; then
             # Extract various DNS records and process them
@@ -738,11 +765,14 @@ function sub_dns() {
                 | grep -E '^([a-zA-Z0-9][-a-zA-Z0-9]*\.)+[a-zA-Z]{2,}$' \
                 | sort -u | anew -q .tmp/subdomains_dns.txt || true
 
-            jq -r '.. | strings | select(test("^(\\d{1,3}\\.){3}\\d{1,3}$|^[0-9a-fA-F:]+$"))' <"subdomains/subdomains_dnsregs.json" \
-                | sort -u | run_command hakip2host | awk '{print $3}' | unfurl -u domains \
-                | sed -e 's/^\*\.//' -e 's/\.$//' -e '/\./!d' | grep -E "$DOMAIN_MATCH_REGEX" \
-                | grep -E '^([a-zA-Z0-9][-a-zA-Z0-9]*\.)+[a-zA-Z]{2,}$' | sort -u \
-                | anew -q .tmp/subdomains_dns.txt || true
+            # Reverse-DNS pivots are slow on large targets: DEEP only
+            if [[ "${DEEP:-false}" == true ]]; then
+                jq -r '.. | strings | select(test("^(\\d{1,3}\\.){3}\\d{1,3}$|^[0-9a-fA-F:]+$"))' <"subdomains/subdomains_dnsregs.json" \
+                    | sort -u | run_command hakip2host | awk '{print $3}' | unfurl -u domains \
+                    | sed -e 's/^\*\.//' -e 's/\.$//' -e '/\./!d' | grep -E "$DOMAIN_MATCH_REGEX" \
+                    | grep -E '^([a-zA-Z0-9][-a-zA-Z0-9]*\.)+[a-zA-Z]{2,}$' | sort -u \
+                    | anew -q .tmp/subdomains_dns.txt || true
+            fi
 
             # Extra reverse-IP pivots via ip.thc.org (DEEP only: one HTTP request
             # per IP; capped and parallel so it cannot stall the run)
@@ -814,7 +844,10 @@ function sub_brute() {
             return 0
         fi
 
-        _bruteforce_domains "$wordlist" "$domain" .tmp/subs_brute.txt
+        log_note "sub_brute wordlist=${wordlist} entries=$(wc -l <"$wordlist" 2>/dev/null | tr -d ' ')" "${FUNCNAME[0]}" "${LINENO}"
+        if ! _bruteforce_domains "$wordlist" "$domain" .tmp/subs_brute.txt; then
+            _print_msg WARN "Bruteforce failed (wordlist: $wordlist) - see ${LOGFILE}"
+        fi
 
         # Resolve the subdomains
         if [[ -s ".tmp/subs_brute.txt" ]]; then
@@ -872,11 +905,11 @@ function sub_ns_delegation() {
         fi
 
         # Check NS records for each known subdomain
+        print_notice RUN "sub_ns_delegation" "checking NS delegation"
         : >.tmp/ns_delegation_raw.txt
-        run_command dnsx -ns -resp -silent -retry 2 \
+        _enrich_input subdomains/subdomains.txt | _run_timed_command "${NS_ENUM_TIMEOUT:-5m}" dnsx -ns -resp -silent -retry 2 \
             -t "${DNSX_THREADS:-100}" -rl "${DNSX_RATE_LIMIT:-500}" \
-            -r "$resolvers_trusted" \
-            <subdomains/subdomains.txt >.tmp/ns_delegation_raw.txt 2>>"$LOGFILE" || true
+            -r "$resolvers_trusted" >.tmp/ns_delegation_raw.txt 2>>"$LOGFILE" || true
 
         if [[ ! -s ".tmp/ns_delegation_raw.txt" ]]; then
             end_subfunc "0 new subs (ns delegation - no NS records)" "${FUNCNAME[0]}" "SKIP"
