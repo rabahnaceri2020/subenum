@@ -1,15 +1,11 @@
 #!/bin/bash
-# subenum - Utility functions module
-# Trimmed from reconFTW (modules/utils.sh) to only what subdomain enumeration needs.
+# subenum - utility module: file mgmt, sanitization, downloads, DNS resolver
+# selection, domain resolution/bruteforce.
 # This file is sourced by subenum.sh - do not execute directly
 [[ -z "${SCRIPTPATH:-}" ]] && {
     echo "Error: This module must be sourced by subenum.sh" >&2
     exit 1
 }
-
-###############################################################################################################
-########################################## OPTIONS & MGMT #####################################################
-###############################################################################################################
 
 # Remove out-of-scope entries from a file.
 # Usage: deleteOutScoped <oos_file> <target_file>
@@ -17,7 +13,6 @@ function deleteOutScoped() {
     if [[ -s "$1" ]]; then
         while IFS= read -r outscoped; do
             [[ -z "$outscoped" ]] && continue
-            # Escape regex metacharacters including / to prevent sed delimiter injection
             local escaped
             escaped=$(printf '%s' "$outscoped" | sed 's/[.[\*^$()+?{|/\\]/\\&/g')
             if grep -q "^[*]" <<<"$outscoped"; then
@@ -34,7 +29,6 @@ function cleanup_on_exit() {
     local exit_code="${1:-130}"
     printf "\n%b[%s] Interrupted. Cleaning up...%b\n" "$bred" "$(date +'%Y-%m-%d %H:%M:%S')" "$reset"
 
-    # Kill any background processes we spawned (safely)
     local pids
     pids=$(jobs -p 2>/dev/null) || true
     if [[ -n "$pids" ]]; then
@@ -43,9 +37,7 @@ function cleanup_on_exit() {
         done
     fi
 
-    # Log the interruption
     echo "[$(date +'%Y-%m-%d %H:%M:%S')] Interrupted by signal (exit code: $exit_code)" >>"${LOGFILE:-/dev/null}"
-
     exit "$exit_code"
 }
 
@@ -63,10 +55,8 @@ function rotate_logs() {
 
     [[ ! -d "$log_dir" ]] && return 0
 
-    # Delete logs older than max_age_days
     find "$log_dir" -name "*.txt" -type f -mtime +"${max_age_days}" -delete 2>/dev/null || true
 
-    # If still too many, keep only the newest max_logs
     local count
     count=$(find "$log_dir" -name "*.txt" -type f 2>/dev/null | wc -l)
     if [[ $count -gt $max_logs ]]; then
@@ -76,8 +66,8 @@ function rotate_logs() {
     fi
 }
 
+# Sets $runtime (and prints it to stdout).
 function getElapsedTime {
-    # Sets $runtime (for backward compat) and also prints to stdout
     runtime=""
     local T=$(($2 - $1))
     local D=$((T / 60 / 60 / 24))
@@ -90,18 +80,15 @@ function getElapsedTime {
     runtime="${runtime}${S} seconds."
 }
 
-# Lightweight log helper for non-fatal explanations
-# Usage: log_note "message" [function] [line]
+# Append a note to the run log.
 function log_note() {
     local msg="$1"
     local fn="${2:-main}"
     local ln="${3:-0}"
-    local ts
-    ts="$(date +'%Y-%m-%d %H:%M:%S')"
-    echo "[$ts] NOTE @ ${fn}:${ln} :: ${msg}" >>"${LOGFILE:-/dev/null}"
+    echo "[$(date +'%Y-%m-%d %H:%M:%S')] NOTE @ ${fn}:${ln} :: ${msg}" >>"${LOGFILE:-/dev/null}"
 }
 
-# Explain common non-fatal ERRs (e.g., anew -q with no new lines)
+# Explain common non-fatal ERRs (anew/wc returning 1 with no output).
 # Usage: explain_err <rc> <cmd> <func> <line>
 function explain_err() {
     local rc="$1"
@@ -111,16 +98,12 @@ function explain_err() {
 
     [[ $rc -ne 1 ]] && return 0
 
-    # Detect 'anew -q <target>' and emit a helpful note
     if [[ $cmd =~ \banew[[:space:]]+-q[[:space:]]+([^[:space:]]+) ]]; then
         local target="${BASH_REMATCH[1]}"
-
-        # Strip quotes
         target="${target%\"}"
         target="${target#\"}"
         target="${target%\'}"
         target="${target#\'}"
-
         if [[ -z "$target" ]]; then
             log_note "anew returned no new lines (target unresolved)" "$fn" "$ln"
         elif [[ ! -e "$target" ]]; then
@@ -133,27 +116,20 @@ function explain_err() {
         return 0
     fi
 
-    # Generic note for wc -l failures (often from missing input in pipelines)
     if [[ $cmd =~ \bwc[[:space:]]+-l\b ]]; then
         log_note "wc -l failed (likely upstream pipeline had no input or a missing file)" "$fn" "$ln"
         return 0
     fi
 }
 
-# Execute command in dry-run mode if enabled
-# Usage: run_command <command> [args...]
+# Execute a command (dry-run aware, stderr routed to the debug log).
 function run_command() {
     if [[ "${DRY_RUN:-false}" == "true" ]]; then
-        # Extract tool name (first word, strip path)
         local tool_name="${1##*/}"
-        local full_cmd="$*"
-        local redacted_cmd="$full_cmd"
-
-        # Track command for module summary
         if declare -F ui_dryrun_track >/dev/null 2>&1; then
-            ui_dryrun_track "$tool_name" "$redacted_cmd"
+            ui_dryrun_track "$tool_name" "$*"
         else
-            printf "%b[DRY-RUN] Would execute: %s%b\n" "$yellow" "$redacted_cmd" "$reset"
+            printf "%b[DRY-RUN] Would execute: %s%b\n" "$yellow" "$*" "$reset"
         fi
         return 0
     fi
@@ -169,56 +145,30 @@ function run_command() {
     fi
 }
 
-# Cross-platform sed_i wrapper
-# Usage: sed_i 's/old/new/g' file.txt
+# Cross-platform sed -i wrapper.
 function sed_i() {
     if [[ $# -lt 2 ]]; then
         echo "Usage: sed_i 'pattern' file" >&2
         return 1
     fi
-
-    local pattern="$1"
-    local file="$2"
-
     if sed --version >/dev/null 2>&1; then
-        # GNU sed (Linux or installed via brew on macOS)
-        sed -i "$pattern" "$file"
+        sed -i "$1" "$2"
     else
-        # BSD sed (default macOS)
-        sed -i '' "$pattern" "$file"
+        sed -i '' "$1" "$2"
     fi
 }
 
-###############################################################################################################
-####################################### SECURITY ##############################################################
-###############################################################################################################
-
-# Sanitize domain input to prevent command injection.
-# Accepts bare domains, URLs (strips scheme/userinfo/path/query/fragment/port),
-# and IPv4 addresses (validated inline — octets > 255 rejected).
-# Usage: sanitize_domain <domain_or_url>
-# Returns: sanitized domain (lowercase) or IPv4
+# Sanitize domain/URL input to prevent command injection.
+# Accepts bare domains, URLs and IPv4 addresses.
 function sanitize_domain() {
     local input_domain="$1"
     local working="$input_domain"
 
-    # 1) Strip scheme (scheme://)
-    if [[ "$working" =~ ^[a-zA-Z][a-zA-Z0-9+.-]*:// ]]; then
-        working="${working#*://}"
-    fi
-
-    # 2) Cut at first / ? # (path / query / fragment).
+    [[ "$working" =~ ^[a-zA-Z][a-zA-Z0-9+.-]*:// ]] && working="${working#*://}"
     working="${working%%[/?#]*}"
-
-    # 3) Strip userinfo (user:pass@host)
-    if [[ "$working" == *@* ]]; then
-        working="${working##*@}"
-    fi
-
-    # 4) Strip :port
+    [[ "$working" == *@* ]] && working="${working##*@}"
     working="${working%%:*}"
 
-    # 5) IPv4 post-normalization: redirect to inline octet validation.
     if [[ "$working" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
         local -a _octs
         IFS='.' read -ra _octs <<<"$working"
@@ -233,7 +183,6 @@ function sanitize_domain() {
         return 0
     fi
 
-    # 6) Hardening: char whitelist + lowercase + trim leading/trailing dots/hyphens
     local sanitized
     sanitized=$(echo "$working" | tr -cd 'a-zA-Z0-9.-')
     sanitized=$(echo "$sanitized" | tr '[:upper:]' '[:lower:]')
@@ -243,7 +192,6 @@ function sanitize_domain() {
         print_errorf "Invalid domain after sanitization: '%s'" "$input_domain"
         return 1
     fi
-
     if [[ ! "$sanitized" =~ \. ]]; then
         print_warnf "Domain '%s' has no TLD, may be invalid" "$sanitized" >&2
     fi
@@ -252,209 +200,136 @@ function sanitize_domain() {
     return 0
 }
 
-# Validate and sanitize IP/CIDR input
-# Usage: sanitize_ip <ip_or_cidr>
+# Validate and sanitize IP/CIDR input.
 function sanitize_ip() {
-    local input="$1"
     local sanitized
-
-    sanitized=$(echo "$input" | tr -cd '0-9./,')
+    sanitized=$(echo "$1" | tr -cd '0-9./,')
     if [[ -z "$sanitized" ]]; then
-        print_errorf "Invalid IP/CIDR after sanitization: '%s'" "$input"
+        print_errorf "Invalid IP/CIDR after sanitization: '%s'" "$1"
         return 1
     fi
-
     echo "$sanitized"
     return 0
 }
 
 # Sanitize a single entry from a -l list file.
-# Usage: domain=$(_sanitize_list_entry "$raw") || continue
 _sanitize_list_entry() {
-    local raw="$1"
-    if [[ "$raw" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(/[0-9]+)?$ ]]; then
-        sanitize_ip "$raw"
+    if [[ "$1" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(/[0-9]+)?$ ]]; then
+        sanitize_ip "$1"
     else
-        sanitize_domain "$raw"
+        sanitize_domain "$1"
     fi
 }
 
-###############################################################################################################
-####################################### DEEP HELPERS ##########################################################
-###############################################################################################################
-
-###############################################################################################################
-####################################### RESOURCE CACHE ########################################################
-###############################################################################################################
-
-CACHE_DIR="${SCRIPTPATH}/.cache"
-CACHE_MAX_AGE_DAYS="${CACHE_MAX_AGE_DAYS:-30}"
-
-function cache_init() {
-    mkdir -p "$CACHE_DIR"/{wordlists,resolvers,tools}
-}
-
-# Resolve TTL per cache type.
-function cache_max_age_for_type() {
-    case "${1:-tools}" in
-        resolvers) echo "${CACHE_MAX_AGE_DAYS_RESOLVERS:-${CACHE_MAX_AGE_DAYS:-30}}" ;;
-        wordlists) echo "${CACHE_MAX_AGE_DAYS_WORDLISTS:-${CACHE_MAX_AGE_DAYS:-30}}" ;;
-        tools|*) echo "${CACHE_MAX_AGE_DAYS_TOOLS:-${CACHE_MAX_AGE_DAYS:-30}}" ;;
-    esac
-}
-
-# Check if cached file is still valid
-# Usage: cache_is_valid <cache_file> [cache_type]
-function cache_is_valid() {
-    local cache_file="$1"
-    local cache_type="${2:-tools}"
-    local max_age_days
-    max_age_days=$(cache_max_age_for_type "$cache_type")
-
-    [[ ! -f "$cache_file" ]] && return 1
-    [[ "${CACHE_REFRESH:-false}" == "true" ]] && return 1
-
-    local file_mtime
-    if [[ "$(uname -s)" == "Darwin" ]]; then
-        file_mtime=$(stat -f "%m" "$cache_file" 2>/dev/null)
-    else
-        file_mtime=$(stat -c "%Y" "$cache_file" 2>/dev/null)
-    fi
-
-    if [[ -z "$file_mtime" ]] || ! [[ "$file_mtime" =~ ^[0-9]+$ ]]; then
-        return 1
-    fi
-
-    local current_time
-    current_time=$(date +%s)
-    local file_age_seconds=$((current_time - file_mtime))
-    local file_age_days=$((file_age_seconds / 86400))
-
-    if [ "$file_age_days" -lt "$max_age_days" ]; then
-        return 0
-    else
-        return 1
-    fi
-}
-
-# Download file with typed cache support
-# Usage: cached_download_typed <url> <destination> [cache_name] [cache_type]
-function cached_download_typed() {
-    local url="$1"
-    local destination="$2"
-    local cache_name="${3:-$(basename "$url")}"
-    local cache_type="${4:-tools}"
-    local cache_file="$CACHE_DIR/$cache_type/$cache_name"
-    local -a curl_cmd
-
-    cache_init
-
-    # Check if we have valid cached version
-    if cache_is_valid "$cache_file" "$cache_type"; then
-        cp "$cache_file" "$destination"
-        return 0
-    fi
-
-    mkdir -p "$(dirname "$cache_file")"
-    mkdir -p "$(dirname "$destination")" 2>/dev/null || true
-
-    curl_cmd=(curl -sL "$url" -o "$destination")
-    if [[ "$cache_type" == "resolvers" ]]; then
-        curl_cmd=(
-            curl -fsSL
-            --connect-timeout "${RESOLVER_DOWNLOAD_CONNECT_TIMEOUT:-10}"
-            --max-time "${RESOLVER_DOWNLOAD_MAX_TIME:-120}"
-            --retry "${RESOLVER_DOWNLOAD_RETRY:-2}"
-            --retry-delay "${RESOLVER_DOWNLOAD_RETRY_DELAY:-2}"
-            --retry-connrefused
-            "$url" -o "$destination"
-        )
-    fi
-
-    if run_command "${curl_cmd[@]}"; then
-        # Save to cache for future use
-        cp "$destination" "$cache_file" 2>/dev/null || true
-        return 0
-    else
-        printf "%b[%s] Download failed: %s%b\n" \
-            "$bred" "$(date +'%Y-%m-%d %H:%M:%S')" "$url" "$reset" >&2
-        return 1
-    fi
-}
-
-# Clear old cache files
-function cache_clean() {
-    local max_age="${1:-${CACHE_MAX_AGE_DAYS:-30}}"
-
-    [[ ! -d "$CACHE_DIR" ]] && return 0
-
-    local cleaned=0
-    local current_time
-    current_time=$(date +%s)
-
-    while IFS= read -r -d '' file; do
-        local file_mtime
-        if [[ "$(uname -s)" == "Darwin" ]]; then
-            file_mtime=$(stat -f "%m" "$file" 2>/dev/null)
-        else
-            file_mtime=$(stat -c "%Y" "$file" 2>/dev/null)
-        fi
-
-        [[ -z "$file_mtime" ]] || ! [[ "$file_mtime" =~ ^[0-9]+$ ]] && continue
-
-        local file_age_seconds=$((current_time - file_mtime))
-        local file_age_days=$((file_age_seconds / 86400))
-
-        if [ $file_age_days -gt $max_age ]; then
-            rm -f "$file"
-            cleaned=$((cleaned + 1))
-        fi
-    done < <(find "$CACHE_DIR" -type f -print0 2>/dev/null)
-
-    if [ $cleaned -gt 0 ]; then
-        printf "%b[%s] Cleaned %d expired cache files%b\n" \
-            "$bgreen" "$(date +'%Y-%m-%d %H:%M:%S')" "$cleaned" "$reset"
-    fi
-}
-
-###############################################################################################################
-####################################### WORDLIST HELPERS ######################################################
-###############################################################################################################
-
-# Ensure a plaintext wordlist exists; if missing, try to expand a sibling .gz file.
-# Usage: ensure_wordlist_file <path>
+# Ensure a plaintext wordlist exists; expand a sibling .gz if needed.
 function ensure_wordlist_file() {
     local file="$1"
     local gz_file="${file}.gz"
 
-    # Prefer existing plaintext.
     [[ -s "$file" ]] && return 0
     [[ ! -s "$gz_file" ]] && return 1
-
     command -v gzip >/dev/null 2>&1 || return 1
 
     mkdir -p "$(dirname "$file")" 2>/dev/null || true
 
     local tmp
-    if command -v mktemp >/dev/null 2>&1; then
-        tmp="$(mktemp "${file}.tmp.XXXXXX" 2>/dev/null || true)"
-    fi
+    tmp="$(mktemp "${file}.tmp.XXXXXX" 2>/dev/null || true)"
     [[ -z "${tmp:-}" ]] && tmp="${file}.tmp.$$"
 
     if gzip -dc "$gz_file" >"$tmp" 2>/dev/null; then
         mv -f "$tmp" "$file"
         return 0
     fi
-
     rm -f "$tmp" 2>/dev/null || true
     return 1
 }
 
-###############################################################################################################
-########################################## DNS RESOLVER AUTO-DETECTION ########################################
-###############################################################################################################
+# Download a file (resolvers use stricter timeout/retry settings).
+# Usage: _download_file <url> <destination> [resolvers]
+function _download_file() {
+    local url="$1"
+    local dest="$2"
+    local kind="${3:-tools}"
+    mkdir -p "$(dirname "$dest")" 2>/dev/null || true
 
-# Get the primary local IP address (cross-platform: macOS + Linux).
+    if [[ "$kind" == "resolvers" ]]; then
+        run_command curl -fsSL \
+            --connect-timeout "${RESOLVER_DOWNLOAD_CONNECT_TIMEOUT:-10}" \
+            --max-time "${RESOLVER_DOWNLOAD_MAX_TIME:-120}" \
+            --retry "${RESOLVER_DOWNLOAD_RETRY:-2}" \
+            --retry-delay "${RESOLVER_DOWNLOAD_RETRY_DELAY:-2}" \
+            --retry-connrefused "$url" -o "$dest"
+    else
+        run_command curl -sL "$url" -o "$dest"
+    fi
+}
+
+# Refresh resolvers.txt / resolvers_trusted.txt when missing or older than 1 day.
+function resolvers_update() {
+    if [[ "${DRY_RUN:-false}" == "true" ]]; then
+        _print_msg INFO "Dry-run: resolver refresh skipped"
+        return 0
+    fi
+
+    local need_refresh=false
+    local resolvers_stale=false
+    local resolvers_trusted_stale=false
+
+    if [[ -s "$resolvers" ]] && [[ -n "$(find "$resolvers" -mtime +1 -print 2>/dev/null)" ]]; then
+        resolvers_stale=true
+    fi
+    if [[ -s "$resolvers_trusted" ]] && [[ -n "$(find "$resolvers_trusted" -mtime +1 -print 2>/dev/null)" ]]; then
+        resolvers_trusted_stale=true
+    fi
+    if [[ ! -s "$resolvers" ]] || [[ ! -s "$resolvers_trusted" ]] || [[ "$resolvers_stale" == true ]] || [[ "$resolvers_trusted_stale" == true ]]; then
+        need_refresh=true
+    fi
+
+    if [[ $generate_resolvers == true ]]; then
+        if [[ "$need_refresh" == true ]]; then
+            _print_msg WARN "Resolvers seem older than 1 day. Generating custom resolvers..."
+            {
+                rm -f -- "$resolvers"
+                run_command dnsvalidator -tL https://public-dns.info/nameservers.txt -threads "$DNSVALIDATOR_THREADS" -o "$resolvers" >/dev/null || return 1
+                run_command dnsvalidator -tL https://raw.githubusercontent.com/blechschmidt/massdns/master/lists/resolvers.txt -threads "$DNSVALIDATOR_THREADS" -o tmp_resolvers >/dev/null
+            } 2>>"$LOGFILE"
+            [ -s "tmp_resolvers" ] && cat tmp_resolvers | anew -q "$resolvers"
+            [ -s "tmp_resolvers" ] && rm -f tmp_resolvers 2>>"$LOGFILE" >/dev/null
+            if [[ ! -s "$resolvers" ]] && ! run_command wget -q -O - "${resolvers_url}" >"$resolvers"; then
+                _print_msg WARN "Unable to download resolvers from ${resolvers_url}"
+                return 1
+            fi
+            if [[ ! -s "$resolvers_trusted" ]] && ! run_command wget -q -O - "${resolvers_trusted_url}" >"$resolvers_trusted"; then
+                _print_msg WARN "Unable to download trusted resolvers from ${resolvers_trusted_url}"
+                return 1
+            fi
+            if [[ ! -s "$resolvers" ]] || [[ ! -s "$resolvers_trusted" ]]; then
+                _print_msg WARN "Resolver files are missing or empty after update"
+                return 1
+            fi
+            _print_msg OK "Updated resolvers"
+        fi
+        generate_resolvers=false
+    else
+        if [[ "$need_refresh" == true ]]; then
+            _print_msg WARN "Resolvers seem older than 1 day. Downloading new resolvers..."
+            _download_file "${resolvers_url}" "$resolvers" resolvers || return 1
+            _download_file "${resolvers_trusted_url}" "$resolvers_trusted" resolvers || return 1
+            if [[ ! -s "$resolvers" ]] || [[ ! -s "$resolvers_trusted" ]]; then
+                _print_msg WARN "Resolver files are missing or empty after update"
+                return 1
+            fi
+            _print_msg OK "Resolvers updated"
+        fi
+    fi
+}
+
+function resolvers_optimize_local() {
+    sort -u "$resolvers" -o "$resolvers" 2>/dev/null || true
+    sort -u "$resolvers_trusted" -o "$resolvers_trusted" 2>/dev/null || true
+}
+
+# Get the primary local IP address (macOS + Linux).
 _get_local_ip() {
     local ip=""
     if [[ "$(uname)" == "Darwin" ]]; then
@@ -481,7 +356,6 @@ _ip_is_public_ipv4() {
     [[ ${#parts[@]} -ne 4 ]] && return 1
 
     local o1="${parts[0]}" o2="${parts[1]}" o3="${parts[2]}" o4="${parts[3]}"
-
     local o
     for o in "$o1" "$o2" "$o3" "$o4"; do
         [[ "$o" =~ ^[0-9]+$ ]] || return 1
@@ -496,21 +370,19 @@ _ip_is_public_ipv4() {
     [[ "$o1" -eq 192 ]] && [[ "$o2" -eq 168 ]] && return 1
     [[ "$o1" -eq 100 ]] && [[ "$o2" -ge 64 ]] && [[ "$o2" -le 127 ]] && return 1
     [[ "$o1" -ge 224 ]] && return 1
-
     return 0
 }
 
-# Check if a cloud metadata endpoint is reachable.
+# Return 0 when a cloud metadata endpoint is reachable.
 _is_cloud_vps() {
     [[ "${DRY_RUN:-false}" == "true" ]] && return 1
     curl -sf --max-time 2 -o /dev/null http://169.254.169.254/ 2>/dev/null && return 0
     return 1
 }
 
-# Determine if puredns is safe to use (public network / cloud VPS).
+# Return 0 when puredns is safe to use (public network / cloud VPS).
 _can_use_puredns() {
-    local ip="$1"
-    _ip_is_public_ipv4 "$ip" && return 0
+    _ip_is_public_ipv4 "$1" && return 0
     _is_cloud_vps && return 0
     return 1
 }
@@ -521,16 +393,11 @@ _is_behind_nat() {
         [[ "$RECON_BEHIND_NAT" == "yes" ]]
         return $?
     fi
-    local ip
-    ip=$(_get_local_ip)
-    if _can_use_puredns "$ip"; then
-        return 1
-    fi
+    _can_use_puredns "$(_get_local_ip)" && return 1
     return 0
 }
 
-# Initialize and cache DNS resolver selection (evaluate once per run).
-# Must be called after config is loaded.
+# Evaluate and cache the DNS resolver selection once per run.
 init_dns_resolver() {
     local mode="${DNS_RESOLVER:-auto}"
     local ip
@@ -538,9 +405,7 @@ init_dns_resolver() {
 
     RECON_LOCAL_IP="${ip:-}"
     RECON_BEHIND_NAT="yes"
-    if _can_use_puredns "$ip"; then
-        RECON_BEHIND_NAT="no"
-    fi
+    _can_use_puredns "$ip" && RECON_BEHIND_NAT="no"
     export RECON_LOCAL_IP RECON_BEHIND_NAT
 
     DNS_RESOLVER_SELECTED=""
@@ -548,15 +413,9 @@ init_dns_resolver() {
         puredns|dnsx)
             DNS_RESOLVER_SELECTED="$mode"
             ;;
-        auto|"")
-            if [[ "$RECON_BEHIND_NAT" == "no" ]]; then
-                DNS_RESOLVER_SELECTED="puredns"
-            else
-                DNS_RESOLVER_SELECTED="dnsx"
-            fi
-            ;;
         *)
-            print_warnf "DNS_RESOLVER invalid: '%s' (use auto|puredns|dnsx). Defaulting to auto." "$mode"
+            [[ "$mode" != "auto" && -n "$mode" ]] && \
+                print_warnf "DNS_RESOLVER invalid: '%s' (use auto|puredns|dnsx). Defaulting to auto." "$mode"
             if [[ "$RECON_BEHIND_NAT" == "no" ]]; then
                 DNS_RESOLVER_SELECTED="puredns"
             else
@@ -570,22 +429,12 @@ init_dns_resolver() {
         "$(date +'%Y-%m-%d %H:%M:%S')" "$DNS_RESOLVER_SELECTED" "${DNS_RESOLVER:-auto}" "${ip:-}" "$RECON_BEHIND_NAT" >>"${LOGFILE:-/dev/null}"
 }
 
-# Select DNS resolver based on DNS_RESOLVER config and NAT detection.
-# Returns "puredns" or "dnsx".
+# Return "puredns" or "dnsx" based on config and NAT detection.
 _select_dns_resolver() {
     local mode="${DNS_RESOLVER:-auto}"
     case "$mode" in
         puredns) echo "puredns" ;;
         dnsx)    echo "dnsx" ;;
-        auto|"")
-            if [[ -n "${DNS_RESOLVER_SELECTED:-}" ]]; then
-                echo "$DNS_RESOLVER_SELECTED"
-            elif _is_behind_nat; then
-                echo "dnsx"
-            else
-                echo "puredns"
-            fi
-            ;;
         *)
             if [[ -n "${DNS_RESOLVER_SELECTED:-}" ]]; then
                 echo "$DNS_RESOLVER_SELECTED"
@@ -598,7 +447,7 @@ _select_dns_resolver() {
     esac
 }
 
-# Return 0 when timeout should be enforced, 1 when disabled.
+# Return 0 when a timeout should be enforced, 1 when disabled.
 _dns_timeout_enabled() {
     case "${1:-0}" in
         "" | 0 | 0s | 0m | 0h | 0d) return 1 ;;
@@ -606,11 +455,9 @@ _dns_timeout_enabled() {
     esac
 }
 
-# Ensure resolver files required by the selected resolver mode are present.
+# Ensure the resolver files required by the selected mode are present.
 _ensure_dns_resolver_files() {
-    local resolver_mode="$1"
-
-    case "$resolver_mode" in
+    case "$1" in
         dnsx)
             if [[ ! -s "$resolvers_trusted" ]]; then
                 print_errorf "Missing required trusted resolvers file for dnsx: %s" "$resolvers_trusted"
@@ -618,25 +465,20 @@ _ensure_dns_resolver_files() {
             fi
             ;;
         puredns)
-            if [[ ! -s "$resolvers" ]]; then
-                print_errorf "Missing required resolvers file for puredns: %s" "$resolvers"
-                return 1
-            fi
-            if [[ ! -s "$resolvers_trusted" ]]; then
-                print_errorf "Missing required trusted resolvers file for puredns: %s" "$resolvers_trusted"
+            if [[ ! -s "$resolvers" ]] || [[ ! -s "$resolvers_trusted" ]]; then
+                print_errorf "Missing required resolvers files for puredns: %s" "$resolvers"
                 return 1
             fi
             ;;
         *)
-            print_errorf "Unsupported DNS resolver mode: %s" "$resolver_mode"
+            print_errorf "Unsupported DNS resolver mode: %s" "$1"
             return 1
             ;;
     esac
-
     return 0
 }
 
-# Execute DNS command with heartbeat and optional hard-timeout.
+# Execute a DNS command with heartbeat and optional hard timeout.
 _run_dns_with_heartbeat() {
     local label="$1"
     local timeout_value="$2"
@@ -664,7 +506,6 @@ _resolve_domains() {
     local output_file="$2"
     local resolver
     resolver=$(_select_dns_resolver)
-
     _ensure_dns_resolver_files "$resolver" || return 1
 
     if [[ "$resolver" == "dnsx" ]]; then
@@ -701,7 +542,6 @@ _bruteforce_domains() {
     local output_file="$3"
     local resolver
     resolver=$(_select_dns_resolver)
-
     _ensure_dns_resolver_files "$resolver" || return 1
 
     if [[ "$resolver" == "dnsx" ]]; then

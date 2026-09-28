@@ -51,7 +51,6 @@ _INIT_SCRIPTPATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd -
 SCRIPTPATH="${_INIT_SCRIPTPATH}"
 
 # Source libraries first (pure utilities)
-source "${_INIT_SCRIPTPATH}/lib/validation.sh"
 source "${_INIT_SCRIPTPATH}/lib/common.sh"
 source "${_INIT_SCRIPTPATH}/lib/ui.sh"
 source "${_INIT_SCRIPTPATH}/lib/parallel.sh"
@@ -59,7 +58,6 @@ source "${_INIT_SCRIPTPATH}/lib/parallel.sh"
 # Source modules in dependency order
 source "${_INIT_SCRIPTPATH}/modules/utils.sh"
 source "${_INIT_SCRIPTPATH}/modules/core.sh"
-source "${_INIT_SCRIPTPATH}/modules/resolvers.sh"
 source "${_INIT_SCRIPTPATH}/modules/subdomains.sh"
 
 # Allow sourcing functions without execution (for testing)
@@ -86,7 +84,6 @@ function help() {
     printf "   --parallel                  Run independent phases in parallel (default)\n"
     printf "   --force                     Re-run all methods (ignore cached markers)\n"
     printf "   --gen-resolvers             Generate custom resolvers with dnsvalidator\n"
-    printf "   --refresh-cache             Force refresh of cached resolvers\n"
     printf "   -q <rate>                   Rate limit in requests per second\n"
     printf " \n"
     printf " %bGENERAL OPTIONS%b\n" "${bblue:-}" "${reset:-}"
@@ -160,7 +157,6 @@ CLI_PARALLEL_MODE=""
 CLI_FORCE_RESCAN=false
 CLI_DRY_RUN=false
 CLI_GENERATE_RESOLVERS=false
-CLI_CACHE_REFRESH=false
 CHECK_TOOLS_OR_EXIT=false
 CUSTOM_CONFIG=""
 outOfScope_file=""
@@ -169,7 +165,7 @@ list=""
 domain=""
 rate_limit=""
 
-PROGARGS=$(getopt -o 'd:l:o:x:i:f:q:h' --long 'domain:,list:,output:,out-of-scope:,in-scope:,config:,only:,deep,help,gen-resolvers,refresh-cache,force,dry-run,parallel,no-parallel,quiet,verbose,no-color,check-tools,show-cache,banner,no-banner,legal,source-only' -n 'subenum' -- "$@")
+PROGARGS=$(getopt -o 'd:l:o:x:i:f:q:h' --long 'domain:,list:,output:,out-of-scope:,in-scope:,config:,only:,deep,help,gen-resolvers,force,dry-run,parallel,no-parallel,quiet,verbose,no-color,check-tools,show-cache,banner,no-banner,legal,source-only' -n 'subenum' -- "$@")
 exit_status=$?
 if [[ $exit_status -ne 0 ]]; then
     UNKNOWN_ARGUMENT=true
@@ -256,11 +252,6 @@ while true; do
             ;;
         '--gen-resolvers')
             CLI_GENERATE_RESOLVERS=true
-            shift
-            continue
-            ;;
-        '--refresh-cache')
-            CLI_CACHE_REFRESH=true
             shift
             continue
             ;;
@@ -380,9 +371,6 @@ if [[ "${CLI_DRY_RUN:-false}" == "true" ]]; then
 fi
 if [[ "${CLI_GENERATE_RESOLVERS:-false}" == "true" ]]; then
     generate_resolvers=true
-fi
-if [[ "${CLI_CACHE_REFRESH:-false}" == "true" ]]; then
-    CACHE_REFRESH=true
 fi
 SHOW_CACHE="${SHOW_CACHE:-false}"
 
@@ -533,10 +521,6 @@ subenum_target() {
     # Traps for cleanup / resume sentinel sweep
     trap 'cleanup_on_exit' INT TERM
     trap '_cleanup_inprogress' EXIT
-
-    log_init
-    cache_init
-    cache_clean "${CACHE_MAX_AGE_DAYS:-30}" 2>>"${LOGFILE:-/dev/null}" || true
 
     # Non-fatal error trap: log and continue
     trap 'rc=$?; ts=$(date +"%Y-%m-%d %H:%M:%S"); cmd=${BASH_COMMAND}; loc_fn=${FUNCNAME[0]:-main}; loc_ln=${BASH_LINENO[0]:-0}; msg="[$ts] ERR($rc) @ ${loc_fn}:${loc_ln} :: ${cmd}"; if [[ -n "${LOGFILE:-}" ]]; then echo "$msg" >>"$LOGFILE"; else echo "$msg" >&2; fi; explain_err "$rc" "$cmd" "$loc_fn" "$loc_ln"' ERR

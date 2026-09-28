@@ -1,61 +1,30 @@
 #!/usr/bin/env bash
-# lib/ui.sh - UI presentation layer for reconFTW
-# Provides TTY detection, color management, progress, batch layout, counters
+# lib/ui.sh - TTY/color handling and status presentation
 
 [[ -n "${_UI_SH_LOADED:-}" ]] && return 0
 declare -r _UI_SH_LOADED=1
 
-# Global state
 _UI_IS_TTY=false
 _UI_NO_COLOR=false
-_UI_LOG_FORMAT="plain"
-_UI_JSONL_STRICT=false
-
-# Dry-run tracking
 _UI_LIVE_ACTIVE=false
 
 ui_init() {
-    # TTY detection
-    if [[ -t 1 ]]; then
-        _UI_IS_TTY=true
-    else
-        _UI_IS_TTY=false
-    fi
+    [[ -t 1 ]] && _UI_IS_TTY=true
 
     # NO_COLOR convention + TERM=dumb + non-TTY default
     if [[ -n "${NO_COLOR:-}" ]] || [[ "${TERM:-}" == "dumb" ]] || [[ "$_UI_IS_TTY" != true ]]; then
         _UI_NO_COLOR=true
     fi
-
     if [[ "$_UI_NO_COLOR" == true ]]; then
-        # shellcheck disable=SC2034  # Color vars used by modules that source this file
+        # shellcheck disable=SC2034  # consumed by sourced modules
         bred="" bgreen="" bblue="" byellow="" yellow="" reset=""
         # shellcheck disable=SC2034
         red="" blue="" green="" cyan=""
-    fi
-
-    _UI_LOG_FORMAT="${LOG_FORMAT:-plain}"
-    case "$_UI_LOG_FORMAT" in
-        plain|jsonl|jsonl-strict) ;;
-        *) _UI_LOG_FORMAT="plain" ;;
-    esac
-    if [[ "$_UI_LOG_FORMAT" == "jsonl-strict" ]]; then
-        _UI_JSONL_STRICT=true
-    else
-        _UI_JSONL_STRICT=false
     fi
 }
 
 ui_is_tty() {
     [[ "$_UI_IS_TTY" == true ]]
-}
-
-ui_is_jsonl() {
-    [[ "$_UI_LOG_FORMAT" == "jsonl" ]] || [[ "$_UI_LOG_FORMAT" == "jsonl-strict" ]]
-}
-
-ui_human_output_enabled() {
-    [[ "$_UI_JSONL_STRICT" != true ]]
 }
 
 ui_term_width() {
@@ -79,11 +48,7 @@ ui_term_width() {
 ui_truncate_text() {
     local text="$1"
     local max="${2:-80}"
-    if ! [[ "$max" =~ ^[0-9]+$ ]] || ((max < 1)); then
-        printf "%s" "$text"
-        return 0
-    fi
-    if (( ${#text} <= max )); then
+    if ! [[ "$max" =~ ^[0-9]+$ ]] || ((max < 1)) || (( ${#text} <= max )); then
         printf "%s" "$text"
         return 0
     fi
@@ -95,26 +60,21 @@ ui_truncate_text() {
 }
 
 ui_live_progress_begin() {
-    ui_human_output_enabled || return 0
     [[ "${OUTPUT_VERBOSITY:-1}" -lt 1 ]] && return 0
     ui_is_tty || return 0
     _UI_LIVE_ACTIVE=true
 }
 
 ui_live_progress_update() {
-    ui_human_output_enabled || return 0
     [[ "${OUTPUT_VERBOSITY:-1}" -lt 1 ]] && return 0
     ui_is_tty || return 0
-    local line="$1"
-    local width
-    width=$(ui_term_width)
-    line=$(ui_truncate_text "$line" "$width")
+    local line
+    line=$(ui_truncate_text "$1" "$(ui_term_width)")
     _UI_LIVE_ACTIVE=true
     printf "\r  %b%s%b\033[K" "${bblue:-}" "$line" "${reset:-}"
 }
 
 ui_live_progress_break() {
-    ui_human_output_enabled || return 0
     [[ "${OUTPUT_VERBOSITY:-1}" -lt 1 ]] && return 0
     ui_is_tty || return 0
     [[ "$_UI_LIVE_ACTIVE" == true ]] || return 0
@@ -122,7 +82,6 @@ ui_live_progress_break() {
 }
 
 ui_live_progress_end() {
-    ui_human_output_enabled || return 0
     [[ "${OUTPUT_VERBOSITY:-1}" -lt 1 ]] && return 0
     ui_is_tty || return 0
     if [[ "$_UI_LIVE_ACTIVE" == true ]]; then
@@ -132,148 +91,31 @@ ui_live_progress_end() {
 }
 
 ui_header() {
-    local target="${domain:-unknown}"
-    local profile="${CUSTOM_CONFIG:-default}"
-    local parallel="${PARALLEL_MODE:-true}"
-    local threads="${PARALLEL_MAX_JOBS:-4}"
-    local outdir="${dir:-unknown}"
+    [[ "${OUTPUT_VERBOSITY:-1}" -lt 1 ]] && return 0
+    local target="${domain:-unknown}" outdir="${dir:-unknown}"
     local started
     started=$(date +'%Y-%m-%d %H:%M:%S')
-    local mode_label="FULL"
-    case "${opt_mode:-r}" in
-        n) mode_label="OSINT-ONLY" ;;
-        w) mode_label="WEB" ;;
-        s) mode_label="SUBDOMAINS" ;;
-        p) mode_label="PASSIVE" ;;
-        a) mode_label="ALL" ;;
-        z) mode_label="ZEN" ;;
-    esac
-
-    ui_log_jsonl "INFO" "header" "Run header" \
-        "mode=${mode_label}" "target=${target}" "parallel=${parallel}" "jobs=${threads}" "outdir=${outdir}" "started=${started}"
-
-    [[ "${OUTPUT_VERBOSITY:-1}" -lt 1 ]] && return 0
-    ui_human_output_enabled || return 0
-
-    local header_line
-    header_line=$(printf "subenum %s | Authorized testing only" "${subenum_version:-}")
-    local width
+    local width rule="" i
     width=$(ui_term_width)
-    local header_rule=""
-    local i
     for ((i = 0; i < width; i++)); do
-        header_rule+="─"
+        rule+="─"
     done
-    header_line=$(ui_truncate_text "$header_line" "$width")
-    printf "%b%s%b\n" "${bgreen:-}" "$header_rule" "${reset:-}"
-    printf "%b%s%b\n" "${bgreen:-}" "$header_line" "${reset:-}"
-    printf "%b%s%b\n" "${bgreen:-}" "$header_rule" "${reset:-}"
-    local line
-    line=$(printf "Mode: %s | Target: %s | Profile: %s | Parallel: %s | Jobs: %s" \
-        "$mode_label" "$target" "$(basename "${profile}")" "$parallel" "$threads")
-    printf "%s\n" "$(ui_truncate_text "$line" "$width")"
-    line=$(printf "Output: %s" "$outdir")
-    printf "%s\n" "$(ui_truncate_text "$line" "$width")"
+    printf "%b%s%b\n" "${bgreen:-}" "$rule" "${reset:-}"
+    printf "%b%s%b\n" "${bgreen:-}" "$(ui_truncate_text "subenum ${subenum_version:-} | Authorized testing only" "$width")" "${reset:-}"
+    printf "%b%s%b\n" "${bgreen:-}" "$rule" "${reset:-}"
+    printf "%s\n" "$(ui_truncate_text "Mode: SUBDOMAINS | Target: ${target} | Parallel: ${PARALLEL_MODE:-true} | Jobs: ${PARALLEL_MAX_JOBS:-4}" "$width")"
+    printf "%s\n" "$(ui_truncate_text "Output: ${outdir}" "$width")"
     if [[ -n "${RECON_BEHIND_NAT:-}" ]] || [[ -n "${DNS_RESOLVER_SELECTED:-}" ]]; then
-        line=$(printf "Network: behind_nat=%s | DNS: %s" "${RECON_BEHIND_NAT:-unknown}" "${DNS_RESOLVER_SELECTED:-unknown}")
-        printf "%s\n" "$(ui_truncate_text "$line" "$width")"
+        printf "%s\n" "$(ui_truncate_text "Network: behind_nat=${RECON_BEHIND_NAT:-unknown} | DNS: ${DNS_RESOLVER_SELECTED:-unknown}" "$width")"
     fi
-    if [[ -n "${PERF_PROFILE_INFO:-}" ]] || [[ -n "${DISK_SPACE_INFO:-}" ]]; then
-        local info_line=""
-        if [[ -n "${PERF_PROFILE_INFO:-}" ]]; then
-            info_line="${PERF_PROFILE_INFO}"
-        fi
-        if [[ -n "${DISK_SPACE_INFO:-}" ]]; then
-            if [[ -n "$info_line" ]]; then
-                info_line="${info_line} | ${DISK_SPACE_INFO}"
-            else
-                info_line="${DISK_SPACE_INFO}"
-            fi
-        fi
-        line=$(printf "System: %s" "$info_line")
-        printf "%s\n" "$(ui_truncate_text "$line" "$width")"
-    fi
-    line=$(printf "Started: %s" "$started")
-    printf "%s\n\n" "$(ui_truncate_text "$line" "$width")"
-}
-
-ui_batch_start() {
-    local label="$1" total_jobs="$2" batch_num="${3:-}" batch_total="${4:-}"
-    ui_log_jsonl "INFO" "parallel_batch" "Parallel batch started" \
-        "label=${label}" "jobs=${total_jobs}" "batch_num=${batch_num}" "batch_total=${batch_total}"
-    ui_human_output_enabled || return 0
-    ui_live_progress_break
-
-    if ui_is_tty; then
-        printf "\n"
-    fi
-
-    local batch_label=""
-    if [[ -n "$batch_num" ]] && [[ -n "$batch_total" ]]; then
-        batch_label="Batch ${batch_num}/${batch_total}: "
-    fi
-
-    printf "  %b── %s%s [%d jobs] ──%b\n" \
-        "${bgreen:-}" "$batch_label" "$label" "$total_jobs" "${reset:-}"
-}
-
-ui_batch_end() {
-    local ok="$1" warn="$2" fail="$3" elapsed="$4"
-    local skip="${5:-0}" cache="${6:-0}"
-    local completed="${7:-0}" total="${8:-0}"
-    ui_log_jsonl "INFO" "parallel_batch" "Parallel batch completed" \
-        "ok=${ok}" "warn=${warn}" "fail=${fail}" "skip=${skip}" "cache=${cache}" \
-        "completed=${completed}" "total=${total}" "elapsed=${elapsed}"
-    ui_human_output_enabled || return 0
-    ui_live_progress_break
-    printf "  %b── ok:%d warn:%d fail:%d skip:%d cache:%d │ %d/%d completed │ %ds elapsed ──%b\n" \
-        "${bgreen:-}" "$ok" "$warn" "$fail" "$skip" "$cache" "$completed" "$total" "$elapsed" "${reset:-}"
-}
-
-ui_json_escape() {
-    local s="$1"
-    s=${s//\\/\\\\}
-    s=${s//"/\\"}
-    s=${s//$'\n'/\\n}
-    s=${s//$'\r'/\\r}
-    s=${s//$'\t'/\\t}
-    printf "%s" "$s"
-}
-
-ui_log_jsonl() {
-    ui_is_jsonl || return 0
-    local level="$1" module="$2" message="$3"
-    shift 3
-
-    local ts lvl mod msg dom
-    ts=$(date -Iseconds)
-    lvl=$(ui_json_escape "$level")
-    mod=$(ui_json_escape "$module")
-    msg=$(ui_json_escape "$message")
-    dom=$(ui_json_escape "${domain:-}")
-
-    local extra=""
-    local kv key val
-    for kv in "$@"; do
-        if [[ "$kv" =~ ^([^=]+)=(.*)$ ]]; then
-            key=$(ui_json_escape "${BASH_REMATCH[1]}")
-            val=$(ui_json_escape "${BASH_REMATCH[2]}")
-            extra+=",\"${key}\":\"${val}\""
-        fi
-    done
-
-    printf '{"ts":"%s","level":"%s","module":"%s","msg":"%s","domain":"%s"%s}\n' \
-        "$ts" "$lvl" "$mod" "$msg" "$dom" "$extra"
+    printf "%s\n\n" "$(ui_truncate_text "Started: ${started}" "$width")"
 }
 
 # Print the command a dry run would execute (verbose only)
 # Usage: ui_dryrun_track "tool_name" "full command string"
 ui_dryrun_track() {
-    local full_command="$2"
-
-    # Immediate output only if verbose (OUTPUT_VERBOSITY >= 2)
     if [[ "${OUTPUT_VERBOSITY:-1}" -ge 2 ]]; then
         printf "%b[DRY-RUN]%b %s\n" "${yellow:-}" "${reset:-}" \
-            "$(echo "$full_command" | tr '\n' ' ' | tr -s ' ')"
+            "$(echo "$2" | tr '\n' ' ' | tr -s ' ')"
     fi
 }

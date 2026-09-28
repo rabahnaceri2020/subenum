@@ -1,6 +1,5 @@
 # Runtime artifacts
 install.log
-.cache/
 Recon/
 
 # script.sh runtime artifacts

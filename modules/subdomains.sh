@@ -407,16 +407,13 @@ function sub_passive() {
     if { [[ ! -f "$called_fn_dir/.${FUNCNAME[0]}" ]] || [[ $DIFF == true ]]; } && [[ $SUBPASSIVE == true ]]; then
         start_subfunc "${FUNCNAME[0]}" "Running: Passive Subdomain Enumeration"
 
-        # Run subfinder and check for errors
         run_command subfinder -all -d "$domain" -max-time "$SUBFINDER_ENUM_TIMEOUT" -silent -o .tmp/subfinder_psub.txt 2>>"$LOGFILE" >/dev/null
         run_command curl -s https://ip.thc.org/sb/$domain | grep -v ";;" | anew -q .tmp/subfinder_psub.txt 2>>"$LOGFILE" >/dev/null
 
-        # Check if INSCOPE is true and run check_inscope
         if [[ $INSCOPE == true ]]; then
             check_inscope .tmp/subfinder_psub.txt 2>>"$LOGFILE" >/dev/null
         fi
 
-        # Combine results and count new lines
         if ! NUMOFLINES=$(find .tmp -type f -iname "*_psub.txt" -exec cat {} + | sed "s/^\*\.//" | anew .tmp/passive_subs.txt | sed '/^$/d' | wc -l); then
             NUMOFLINES=0
         fi
@@ -512,7 +509,6 @@ function sub_active() {
             fi
         fi
 
-        # Update resolvers locally
         [[ $RESOLVER_IQ == true ]] && resolvers_optimize_local
 
         # Resolve subdomains using puredns/dnsx
@@ -520,7 +516,6 @@ function sub_active() {
             _resolve_domains .tmp/subs_no_resolved.txt .tmp/subdomains_tmp.txt
         fi
 
-        # Add the domain itself to the list if it resolves
         echo "$domain" | run_command dnsx -retry 3 -silent -r "$resolvers_trusted" \
             2>>"$LOGFILE" | anew -q .tmp/subdomains_tmp.txt
 
@@ -531,7 +526,6 @@ function sub_active() {
             fi
         fi
 
-        # Process subdomains and append new ones to subdomains.txt, count new lines
         local candidate_count=0
         local matched_count=0
         if [[ -s ".tmp/subdomains_tmp.txt" ]]; then
@@ -624,25 +618,21 @@ function sub_noerror() {
     if { [[ ! -f "$called_fn_dir/.${FUNCNAME[0]}" ]] || [[ $DIFF == true ]]; } && [[ $SUBNOERROR == true ]]; then
         start_subfunc "${FUNCNAME[0]}" "Running: Checking NOERROR DNS response"
 
-        # Check for DNSSEC black lies
         random_subdomain="${RANDOM}thistotallynotexist${RANDOM}.$domain"
         dns_response=$(echo "$random_subdomain" | run_command dnsx -r "$resolvers" -rcode noerror,nxdomain -retry 3 -silent 2>>"$LOGFILE" | cut -d' ' -f2)
 
         if [[ $dns_response == "[NXDOMAIN]" ]]; then
 
-            # Determine wordlist based on DEEP setting
             if [[ $DEEP == true ]]; then
                 wordlist="$subs_wordlist_big"
             else
                 wordlist="$subs_wordlist"
             fi
 
-            # Run dnsx and check for errors
             run_command dnsx -d "$domain" -r "$resolvers" -silent \
                 -rcode noerror -w "$wordlist" \
                 2>>"$LOGFILE" | cut -d' ' -f1 | anew -q .tmp/subs_noerror.txt >/dev/null
 
-            # Check inscope if INSCOPE is true
             if [[ $INSCOPE == true ]]; then
                 if ! check_inscope .tmp/subs_noerror.txt 2>>"$LOGFILE" >/dev/null; then
                     print_warnf "check_inscope command failed."
@@ -650,7 +640,6 @@ function sub_noerror() {
                 fi
             fi
 
-            # Process subdomains and append new ones to subdomains.txt, count new lines
             NUMOFLINES=$(grep -E "$DOMAIN_MATCH_REGEX" .tmp/subs_noerror.txt 2>>"$LOGFILE" \
                 | grep -E '^([a-zA-Z0-9\.\-]+\.)+[a-zA-Z]{1,}$' \
                 | sed 's/^\*\.//' | anew subdomains/subdomains.txt | sed '/^$/d' | wc -l | tr -d ' ' || true)
@@ -686,7 +675,6 @@ function sub_srv() {
             return
         fi
 
-        # Build SRV query list: prefix.domain for each prefix
         : >.tmp/srv_queries.txt
         while IFS= read -r prefix; do
             [[ -z "$prefix" || "$prefix" =~ ^[[:space:]]*# ]] && continue
@@ -698,20 +686,16 @@ function sub_srv() {
             return
         fi
 
-        # Query SRV records via dnsx
         : >.tmp/srv_results_raw.txt
         run_command dnsx -srv -resp -silent -retry 2 \
             -t "${DNSX_THREADS:-100}" -rl "${DNSX_RATE_LIMIT:-500}" \
             -r "$resolvers_trusted" \
             <.tmp/srv_queries.txt >.tmp/srv_results_raw.txt 2>>"$LOGFILE" || true
 
-        # Parse SRV target hostnames from output
         : >.tmp/srv_hosts.txt
         if [[ -s ".tmp/srv_results_raw.txt" ]]; then
-            # Save raw data for analysis
             cp .tmp/srv_results_raw.txt subdomains/srv_records.txt
 
-            # Extract hostnames, filter in-scope
             grep -aoE '[a-zA-Z0-9][-a-zA-Z0-9]*(\.[a-zA-Z0-9][-a-zA-Z0-9]*)+' .tmp/srv_results_raw.txt \
                 | sed -e 's/\.$//' -e '/^$/d' \
                 | grep -E '^([a-zA-Z0-9][-a-zA-Z0-9]*\.)+[a-zA-Z]{2,}$' \
@@ -848,19 +832,16 @@ function sub_brute() {
             _print_msg WARN "Bruteforce failed (wordlist: $wordlist) - see ${LOGFILE}"
         fi
 
-        # Resolve the subdomains
         if [[ -s ".tmp/subs_brute.txt" ]]; then
             _resolve_domains .tmp/subs_brute.txt .tmp/subs_brute_valid.txt
         fi
 
-        # Check inscope if INSCOPE is true
         if [[ $INSCOPE == true ]] && [[ -s ".tmp/subs_brute_valid.txt" ]]; then
             if ! check_inscope .tmp/subs_brute_valid.txt 2>>"$LOGFILE" >/dev/null; then
                 print_warnf "check_inscope command failed."
             fi
         fi
 
-        # Process subdomains and append new ones to subdomains.txt, count new lines
         local brute_candidate_count=0
         local brute_matched_count=0
         if [[ -s ".tmp/subs_brute_valid.txt" ]]; then
@@ -927,11 +908,9 @@ function sub_ns_delegation() {
             sub=$(echo "$line" | awk '{print $1}')
             # Skip the base domain itself
             [[ "$sub" == "$domain" ]] && continue
-            # Extract NS hostnames from the bracketed response
             ns_raw=$(echo "$line" | grep -aoE '[a-zA-Z0-9][-a-zA-Z0-9]*(\.[a-zA-Z0-9][-a-zA-Z0-9]*)+' | tail -n +2)
             if [[ -n "$ns_raw" ]]; then
                 echo "$sub" >> .tmp/ns_delegated_zones.txt
-                # Attempt AXFR on each delegated NS
                 while IFS= read -r ns; do
                     [[ -z "$ns" ]] && continue
                     (( axfr_attempts++ )) || true
@@ -945,12 +924,10 @@ function sub_ns_delegation() {
             fi
         done < .tmp/ns_delegation_raw.txt
 
-        # Save delegation info
         if [[ -s ".tmp/ns_delegated_zones.txt" ]]; then
             sort -u .tmp/ns_delegated_zones.txt -o subdomains/ns_delegated_zones.txt
         fi
 
-        # Filter and merge AXFR results
         NUMOFLINES=0
         if [[ -s ".tmp/ns_axfr_results.txt" ]]; then
             grep -E '^([a-zA-Z0-9][-a-zA-Z0-9]*\.)+[a-zA-Z]{2,}$' .tmp/ns_axfr_results.txt \
@@ -1058,7 +1035,6 @@ function sub_permut() {
             return 0
         fi
 
-        # Check if DEEP mode is enabled or subdomains are within DEEP_LIMIT
         if [[ $DEEP == true ]] || [[ $subdomain_count -le $DEEP_LIMIT ]]; then
 
             _generate_permutation_candidates "subdomains/subdomains.txt" ".tmp/gotator1.txt"
@@ -1072,20 +1048,16 @@ function sub_permut() {
             return 0
         fi
 
-        # Resolve the permutations
         if [[ -s ".tmp/gotator1.txt" ]]; then
             _resolve_domains .tmp/gotator1.txt .tmp/permute1.txt
         fi
 
-        # Generate second round of permutations
         _generate_permutation_candidates ".tmp/permute1.txt" ".tmp/gotator2.txt"
 
-        # Resolve the second round of permutations
         if [[ -s ".tmp/gotator2.txt" ]]; then
             _resolve_domains .tmp/gotator2.txt .tmp/permute2.txt
         fi
 
-        # Combine results
         if [[ -s ".tmp/permute1.txt" ]] || [[ -s ".tmp/permute2.txt" ]]; then
             cat .tmp/permute1.txt .tmp/permute2.txt 2>>"$LOGFILE" | anew -q .tmp/permute_subs.txt
 
@@ -1096,14 +1068,12 @@ function sub_permut() {
                 fi
             fi
 
-            # Check inscope if INSCOPE is true
             if [[ $INSCOPE == true ]]; then
                 if ! check_inscope .tmp/permute_subs.txt 2>>"$LOGFILE" >/dev/null; then
                     print_warnf "check_inscope command failed."
                 fi
             fi
 
-            # Process subdomains and append new ones to subdomains.txt, count new lines
             NUMOFLINES=$(grep -E "$DOMAIN_MATCH_REGEX" .tmp/permute_subs.txt 2>>"$LOGFILE" \
                 | grep -E '^([a-zA-Z0-9\.\-]+\.)+[a-zA-Z]{1,}$' \
                 | anew subdomains/subdomains.txt | sed '/^$/d' | wc -l | tr -d ' ' || true)
@@ -1126,13 +1096,11 @@ function sub_permut() {
 
 function sub_regex_permut() {
 
-    # Create necessary directories
     if ! mkdir -p .tmp subdomains; then
         print_warnf "Failed to create directories."
         return 1
     fi
 
-    # Check if the function should run
     if { [[ ! -f "$called_fn_dir/.${FUNCNAME[0]}" ]] || [[ $DIFF == true ]]; } && [[ $SUBREGEXPERMUTE == true ]]; then
         start_subfunc "${FUNCNAME[0]}" "Running: Permutations by regex analysis"
 
@@ -1159,7 +1127,6 @@ function sub_regex_permut() {
             _resolve_domains ".tmp/${domain}.brute" .tmp/regulator.txt
         fi
 
-        # Process the resolved domains
         if [[ -s ".tmp/regulator.txt" ]]; then
             if [[ -s $outOfScope_file ]]; then
                 if ! deleteOutScoped "$outOfScope_file" .tmp/regulator.txt; then
@@ -1197,13 +1164,11 @@ function sub_regex_permut() {
 
 function sub_ia_permut() {
 
-    # Create necessary directories
     if ! mkdir -p .tmp subdomains; then
         print_warnf "Failed to create directories."
         return 1
     fi
 
-    # Check if the function should run
     if { [[ ! -f "$called_fn_dir/.${FUNCNAME[0]}" ]] || [[ $DIFF == true ]]; } && [[ $SUBIAPERMUTE == true ]]; then
         start_subfunc "${FUNCNAME[0]}" "Running: Permutations by AI analysis"
 
@@ -1234,7 +1199,6 @@ function sub_ia_permut() {
             _resolve_domains .tmp/subwiz.txt .tmp/subwiz_resolved.txt
         fi
 
-        # Process the resolved domains
         if [[ -s ".tmp/subwiz_resolved.txt" ]]; then
             if [[ -s $outOfScope_file ]]; then
                 if ! deleteOutScoped "$outOfScope_file" .tmp/subwiz_resolved.txt; then
@@ -1272,17 +1236,14 @@ function sub_ia_permut() {
 
 function sub_recursive_passive() {
 
-    # Create necessary directories
     if ! mkdir -p .tmp subdomains; then
         print_warnf "Failed to create directories."
         return 1
     fi
 
-    # Check if the function should run
     if { [[ ! -f "$called_fn_dir/.${FUNCNAME[0]}" ]] || [[ $DIFF == true ]]; } && [[ $SUB_RECURSIVE_PASSIVE == true ]] && [[ -s "subdomains/subdomains.txt" ]]; then
         start_subfunc "${FUNCNAME[0]}" "Running: Subdomains recursive search passive"
 
-        # Passive recursive
         if [[ -s "subdomains/subdomains.txt" ]]; then
             run_command dsieve -if subdomains/subdomains.txt -f 3 -top "$DEEP_RECURSIVE_PASSIVE" >.tmp/subdomains_recurs_top.txt
         fi
@@ -1334,20 +1295,16 @@ function sub_recursive_passive() {
 }
 
 function sub_recursive_brute() {
-    # Create necessary directories
     if ! mkdir -p .tmp subdomains; then
         print_warnf "Failed to create directories."
         return 1
     fi
 
-    # Check if the function should run
     if { [[ ! -f "$called_fn_dir/.${FUNCNAME[0]}" ]] || [[ $DIFF == true ]]; } && [[ $SUB_RECURSIVE_BRUTE == true ]] && [[ -s "subdomains/subdomains.txt" ]]; then
         start_subfunc "${FUNCNAME[0]}" "Running: Subdomains recursive search active"
 
-        # Check the number of subdomains
         subdomain_count=$(wc -l <subdomains/subdomains.txt)
         if [[ $subdomain_count -le $DEEP_LIMIT ]]; then
-            # Generate top subdomains if not already done
             if [[ ! -s ".tmp/subdomains_recurs_top.txt" ]]; then
                 run_command dsieve -if subdomains/subdomains.txt -f 3 -top "$DEEP_RECURSIVE_PASSIVE" >.tmp/subdomains_recurs_top.txt
             fi
@@ -1376,7 +1333,6 @@ function sub_recursive_brute() {
                 _resolve_domains .tmp/gotator2_recursive.txt .tmp/permute2_recursive.txt
             fi
 
-            # Combine permutations
             if [[ -s ".tmp/permute1_recursive.txt" ]] || [[ -s ".tmp/permute2_recursive.txt" ]]; then
                 cat .tmp/permute1_recursive.txt .tmp/permute2_recursive.txt 2>>"$LOGFILE" | anew -q .tmp/permute_recursive.txt
             fi
@@ -1407,12 +1363,10 @@ function sub_recursive_brute() {
             fi
         fi
 
-        # Final resolve
         if [[ -s ".tmp/brute_perm_recursive.txt" ]]; then
             _resolve_domains .tmp/brute_perm_recursive.txt .tmp/brute_perm_recursive_final.txt
         fi
 
-        # Process final results
         if [[ -s ".tmp/brute_perm_recursive_final.txt" ]]; then
             NUMOFLINES=$(grep -E "$DOMAIN_MATCH_REGEX" .tmp/brute_perm_recursive_final.txt 2>>"$LOGFILE" \
                 | grep -E '^([a-zA-Z0-9\.\-]+\.)+[a-zA-Z]{1,}$' \
