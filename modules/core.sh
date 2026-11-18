@@ -184,7 +184,7 @@ function notification() {
     fi
 }
 
-# Start/end wrappers for individual enumeration methods (checkpoint on end).
+# Start/end wrappers for individual enumeration methods (failed runs stay retryable).
 function start_subfunc() {
     local current_date
     current_date=$(date +'%Y-%m-%d %H:%M:%S')
@@ -196,13 +196,18 @@ function start_subfunc() {
 }
 
 function end_subfunc() {
+    local status="${3:-OK}"
     if [[ -n "${called_fn_dir:-}" ]] && [[ "${DRY_RUN:-false}" != "true" ]]; then
-        touch "$called_fn_dir/.${2}" 2>/dev/null || true
+        if [[ "$status" == "FAIL" || "$status" == "SKIP_NOINPUT" ]]; then
+            # Failed/empty reruns also invalidate any earlier success checkpoint.
+            rm -f -- "$called_fn_dir/.${2}" 2>/dev/null || true
+        else
+            touch "$called_fn_dir/.${2}" 2>/dev/null || true
+        fi
     fi
     end_sub=$(date +%s)
     getElapsedTime "$start_sub" "$end_sub"
     local duration=$((end_sub - start_sub))
-    local status="${3:-OK}"
     local badge="$status"
     local reason_code=""
     case "$status" in

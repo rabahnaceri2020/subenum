@@ -197,6 +197,61 @@ _run_timed_command() {
     fi
 }
 
+# Publish DNS records only after a complete, valid run. dnsx appends to -o,
+# so use a fresh file beside the destination for every run and retain failed
+# output for diagnosis without damaging the last successful result.
+# Usage: _collect_dns_records <input_file> <output_file>
+_collect_dns_records() {
+    local input_file="$1" output_file="$2"
+    local temp_file rc=0 message
+    local -a dns_command=(dnsx -r "$resolvers_trusted" -recon -silent -retry 3 -json)
+
+    # Dry-run wrappers do not consume stdin: avoid a pipe that could SIGPIPE,
+    # and do not create, validate, or replace any DNS output.
+    if [[ "${DRY_RUN:-false}" == "true" ]]; then
+        _run_timed_command "${DNS_RECON_TIMEOUT:-5m}" "${dns_command[@]}" \
+            -o "$output_file" 2>>"$LOGFILE" >/dev/null
+        return $?
+    fi
+
+    if ! temp_file=$(mktemp "${output_file}.tmp.XXXXXX"); then
+        _print_msg WARN "Failed to create temporary DNS output for ${output_file}."
+        return 1
+    fi
+
+    _enrich_input "$input_file" | _run_timed_command "${DNS_RECON_TIMEOUT:-5m}" \
+        "${dns_command[@]}" -o "$temp_file" 2>>"$LOGFILE" >/dev/null || rc=$?
+
+    if ((rc != 0)); then
+        if ((rc == 124)); then
+            message="DNS recon timed out after ${DNS_RECON_TIMEOUT:-5m} (exit ${rc})"
+        else
+            message="DNS recon failed (exit ${rc})"
+        fi
+        message+="; previous output unchanged; partial output: ${temp_file}"
+        _print_msg WARN "$message"
+        log_note "$message" "${FUNCNAME[0]}" "${LINENO}"
+        return "$rc"
+    fi
+
+    if ! jq -n 'reduce inputs as $record (null;
+        if ($record | type) == "object" then . else error("expected a DNS JSON object") end
+        ) | empty' "$temp_file" >/dev/null 2>>"$LOGFILE"; then
+        message="Invalid DNS JSON; previous output unchanged; inspect ${temp_file}"
+        _print_msg WARN "$message"
+        log_note "$message" "${FUNCNAME[0]}" "${LINENO}"
+        return 1
+    fi
+
+    if [[ -d "$output_file" ]] || ! mv -- "$temp_file" "$output_file"; then
+        message="Failed to publish DNS output; validated records retained at ${temp_file}"
+        _print_msg WARN "$message"
+        log_note "$message" "${FUNCNAME[0]}" "${LINENO}"
+        return 1
+    fi
+    return 0
+}
+
 # Initialize subdomain enumeration environment
 # Usage: _subdomains_init
 _subdomains_init() {
@@ -726,8 +781,6 @@ function sub_srv() {
 }
 
 function sub_dns() {
-    ensure_dirs .tmp subdomains
-
     if ! _method_selected "${FUNCNAME[0]}"; then
         skip_notification "mode"
         return 0
@@ -736,11 +789,31 @@ function sub_dns() {
     if [[ ! -f "$called_fn_dir/.${FUNCNAME[0]}" ]] || [[ $DIFF == true ]]; then
         start_subfunc "${FUNCNAME[0]}" "Running: DNS Subdomain Enumeration and PTR search"
 
-        if [[ -s "subdomains/subdomains.txt" ]]; then
-            print_notice RUN "sub_dns" "collecting DNS records (dnsx -recon)"
-            _enrich_input subdomains/subdomains.txt | _run_timed_command "${DNS_RECON_TIMEOUT:-5m}" \
-                dnsx -r "$resolvers_trusted" -recon -silent -retry 3 -json \
-                -o "subdomains/subdomains_dnsregs.json" 2>>"$LOGFILE" >/dev/null
+        if ! ensure_dirs .tmp subdomains; then
+            end_subfunc "Failed to create DNS output directories" "${FUNCNAME[0]}" "FAIL"
+            return 1
+        fi
+        if [[ ! -s "subdomains/subdomains.txt" ]]; then
+            end_subfunc "0 new subs (dns resolution)" "${FUNCNAME[0]}" "SKIP_NOINPUT"
+            return 0
+        fi
+
+        print_notice RUN "sub_dns" "collecting DNS records (dnsx -recon)"
+        local dns_rc=0
+        _collect_dns_records "subdomains/subdomains.txt" "subdomains/subdomains_dnsregs.json" || dns_rc=$?
+        if ((dns_rc != 0)); then
+            end_subfunc "DNS collection incomplete (exit ${dns_rc})" "${FUNCNAME[0]}" "FAIL"
+            return "$dns_rc"
+        fi
+        if [[ "${DRY_RUN:-false}" == "true" ]]; then
+            end_subfunc "DNS collection (dry-run)" "${FUNCNAME[0]}"
+            return 0
+        fi
+
+        # These candidates belong to this run, not to a previous/partial scan.
+        if ! { : >.tmp/subdomains_dns.txt && : >.tmp/subdomains_dns_resolved.txt; }; then
+            end_subfunc "Failed to reset DNS candidate files" "${FUNCNAME[0]}" "FAIL"
+            return 1
         fi
         if [[ -s "subdomains/subdomains_dnsregs.json" ]]; then
             # Extract various DNS records and process them
