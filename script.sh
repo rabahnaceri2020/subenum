@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # subenum pipeline: enumerate subdomains, diff new ones, then httpx -> katana -> nuclei.
 # Usage: script.sh [-l <domain-list-file>]
-# Progress is printed live; subenum output is streamed to the terminal and logged.
+# Progress and results stream live: HTTPX hosts, Katana URLs, and Nuclei findings.
+# Results are also saved under data/; subenum output is streamed and logged.
 
 BASE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DOMAIN_LIST="$BASE/domains.txt"
@@ -141,20 +142,19 @@ for domain in $(cat "$DOMAIN_LIST"); do
         continue
     fi
 
-    # Run HTTPX
+    # Stream and save the first full line for each unique combination of fields after the URL.
+    # Flush awk after each result so piping through tee does not delay terminal output.
     log "Running httpx (timeout: ${HTTPX_TIMEOUT}s)..."
     start_time=$(date +%s)
-    httpx -silent -timeout "$HTTPX_TIMEOUT" $HTTPX_EXTRA_OPTS 2>/dev/null < "$out_new" > "$OUT_DIR/$domain.httpx" &
+    httpx -silent -timeout "$HTTPX_TIMEOUT" $HTTPX_EXTRA_OPTS 2>/dev/null < "$out_new" \
+        | awk '{ key=$0; sub(/^[^ \t]+[ \t]+/, "", key); if (!seen[key]++) { print; fflush(); } }' \
+        | tee "$OUT_DIR/$domain.httpx" &
     wait_with_heartbeat $! "httpx" "$start_time"
     elapsed=$(($(date +%s) - start_time))
     alive_count=$(wc -l < "$OUT_DIR/$domain.httpx" 2>/dev/null || echo 0)
-    log "httpx: ${alive_count} alive hosts (${elapsed}s)"
+    log "httpx: ${alive_count} unique responses (${elapsed}s)"
 
-    # Deduplicate: keep the first full line for each unique combination of all fields after the URL
     if [[ -s "$OUT_DIR/$domain.httpx" ]]; then
-        awk '{ key=$0; sub(/^[^ \t]+[ \t]+/, "", key); if (!seen[key]++) print }' \
-            "$OUT_DIR/$domain.httpx" > "$OUT_DIR/$domain.httpx.tmp"
-        mv "$OUT_DIR/$domain.httpx.tmp" "$OUT_DIR/$domain.httpx"
         notify_file -data "$OUT_DIR/$domain.httpx" -id "$NOTIFY_ID_HTTPX" -bulk
     fi
 
@@ -162,8 +162,13 @@ for domain in $(cat "$DOMAIN_LIST"); do
     if [[ -s "$OUT_DIR/$domain.httpx" ]]; then
         log "Finding JS files with katana (depth: ${KATANA_DEPTH})..."
         start_time=$(date +%s)
-        cut -d " " -f 1 "$OUT_DIR/$domain.httpx" | katana $KATANA_EXTRA_OPTS -d "$KATANA_DEPTH" -mr "$KATANA_REGEX" 2>/dev/null | sort -u > "$OUT_DIR/$domain.jsurls" &
+        cut -d " " -f 1 "$OUT_DIR/$domain.httpx" \
+            | katana $KATANA_EXTRA_OPTS -d "$KATANA_DEPTH" -mr "$KATANA_REGEX" 2>/dev/null \
+            | awk '!seen[$0]++ { print; fflush(); }' \
+            | tee "$OUT_DIR/$domain.jsurls" &
         wait_with_heartbeat $! "katana" "$start_time"
+        # Sort only after streaming: sort in the live pipeline would wait for EOF.
+        sort -u "$OUT_DIR/$domain.jsurls" -o "$OUT_DIR/$domain.jsurls"
         elapsed=$(($(date +%s) - start_time))
         js_count=$(wc -l < "$OUT_DIR/$domain.jsurls" 2>/dev/null || echo 0)
         log "katana: ${js_count} JS files (${elapsed}s)"
