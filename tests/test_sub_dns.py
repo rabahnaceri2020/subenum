@@ -19,6 +19,7 @@ HARNESS = r'''
 set -o pipefail
 set +e
 SCRIPTPATH="$REPO_ROOT"
+source "$SCRIPTPATH/lib/common.sh"
 source "$SCRIPTPATH/modules/core.sh"
 source "$SCRIPTPATH/modules/utils.sh"
 source "$SCRIPTPATH/modules/subdomains.sh"
@@ -28,7 +29,6 @@ _method_selected() { return 0; }
 _print_msg() { printf '%s %s\n' "$1" "$2"; }
 _print_status() { printf '%s %s\n' "$1" "$2"; }
 print_notice() { printf '%s %s %s\n' "$1" "$2" "$3"; }
-skip_notification() { printf 'SKIP %s\n' "$1"; }
 ui_dryrun_track() { printf 'dry-run\n' >> "$TEST_EVENTS"; }
 
 # Emulate dnsx's append behavior, including partial writes and failure codes.
@@ -51,6 +51,10 @@ _resolve_domains() {
     printf 'resolve\n' >> "$TEST_EVENTS"
     cp -- "$1" "$2"
 }
+
+# Deep-mode reverse DNS stays offline; reverse-IP requests are disabled below.
+hakip2host() { while IFS= read -r address; do :; done; }
+unfurl() { while IFS= read -r host; do printf '%s\n' "$host"; done; }
 
 # A local replacement for anew keeps the test independent of installed tools.
 anew() {
@@ -105,7 +109,8 @@ class DNSOutputTests(unittest.TestCase):
             resolvers_trusted=str(self.work / "resolvers.txt"),
             DRY_RUN="false",
             DIFF="false",
-            DEEP="false",
+            DEEP="true",
+            REVERSE_IP_MAX="0",  # No requests through xargs/curl in deep-mode tests.
             INSCOPE="false",
             OUTPUT_VERBOSITY="1",
             ENRICH_MAX_SUBS="3000",
@@ -136,6 +141,49 @@ class DNSOutputTests(unittest.TestCase):
         self.assertNotIn("parse error", result.stdout + result.stderr)
         if self.events.exists():
             self.assertNotIn("resolve", self.events.read_text().splitlines())
+
+    def assert_mode_skip(self, result, checkpoint=False):
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("SKIP sub_dns", result.stdout)
+        self.assertEqual(self.output.read_text(), self.old_data)
+        self.assertFalse(self.events.exists())
+        self.assertEqual(self.partial_files(), [])
+        self.assertEqual(self.checkpoint.exists(), checkpoint)
+        reason = self.work / ".called_fn/.status_reason_sub_dns"
+        self.assertEqual(reason.read_text().strip(), "mode")
+
+    def test_normal_mode_skips_dns_collection(self):
+        result = self.run_stage(DEEP="false")
+        self.assert_mode_skip(result)
+
+    def test_default_config_disables_dns_collection(self):
+        result = self.run_stage(extra='source "$SCRIPTPATH/subenum.cfg"')
+        self.assert_mode_skip(result)
+
+    def test_unset_deep_mode_skips_dns_collection(self):
+        result = self.run_stage(extra="unset DEEP")
+        self.assert_mode_skip(result)
+
+    def test_force_does_not_bypass_deep_requirement(self):
+        self.checkpoint.write_text("previous deep run\n")
+        result = self.run_stage(DEEP="false", DIFF="true")
+        self.assert_mode_skip(result, checkpoint=True)
+        self.assertEqual(self.checkpoint.read_text(), "previous deep run\n")
+
+    def test_normal_dry_run_does_not_schedule_dns_collection(self):
+        result = self.run_stage(DEEP="false", DRY_RUN="true")
+        self.assert_mode_skip(result)
+
+    def test_normal_run_does_not_block_a_later_deep_run(self):
+        self.assert_mode_skip(self.run_stage(DEEP="false"))
+        result = self.run_stage(DEEP="true")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.output.read_text(), self.new_data)
+        self.assertTrue(self.checkpoint.exists())
+
+    def test_deep_mode_still_respects_method_selection(self):
+        result = self.run_stage(extra="_method_selected() { return 1; }")
+        self.assert_mode_skip(result)
 
     def test_success_replaces_instead_of_appending(self):
         result = self.run_stage()

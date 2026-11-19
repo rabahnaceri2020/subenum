@@ -11,7 +11,7 @@
 #   sub_tls               TLS certificate SAN/CN grabbing (tlsx)
 #   sub_noerror           DNS NOERROR brute force (dnsx)
 #   sub_srv               SRV record enumeration (dnsx)
-#   sub_dns               DNS recon + PTR pivots (dnsx, hakip2host)
+#   sub_dns               DNS recon + PTR pivots (--deep only; dnsx, hakip2host)
 #   sub_brute             DNS brute force (puredns/dnsx + wordlist)
 #   sub_ns_delegation     NS delegation + AXFR on delegated zones
 #   sub_permut            DNS permutations (gotator, 2 rounds)
@@ -781,6 +781,12 @@ function sub_srv() {
 }
 
 function sub_dns() {
+    # DNS record enrichment and reverse pivots are opt-in via --deep.
+    if [[ "${DEEP:-false}" != "true" ]]; then
+        skip_notification "mode"
+        return 0
+    fi
+
     if ! _method_selected "${FUNCNAME[0]}"; then
         skip_notification "mode"
         return 0
