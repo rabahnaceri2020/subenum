@@ -357,15 +357,27 @@ run_with_heartbeat() {
         fi
     done
 
-    wait "$cmd_pid"
-    local rc=$?
+    # Guard wait so errexit cannot skip status reporting or TTY cleanup.
+    local rc=0
+    wait "$cmd_pid" || rc=$?
     elapsed=$(($(date +%s) - start_ts))
     if [[ "${OUTPUT_VERBOSITY:-1}" -ge 1 ]]; then
         if [[ "$use_live" == true ]]; then
             ui_live_progress_end
-        else
-            printf "Completed: %s (%s)\n" "$label" "$(format_duration "$elapsed")"
         fi
+        case "$rc" in
+            0)
+                if [[ "$use_live" != true ]]; then
+                    printf "Completed: %s (%s)\n" "$label" "$(format_duration "$elapsed")"
+                fi
+                ;;
+            124)
+                printf "Timed out: %s (%s, exit %s)\n" "$label" "$(format_duration "$elapsed")" "$rc"
+                ;;
+            *)
+                printf "Failed: %s (%s, exit %s)\n" "$label" "$(format_duration "$elapsed")" "$rc"
+                ;;
+        esac
     fi
     return "$rc"
 }

@@ -164,8 +164,23 @@ exec "$REAL_PUREDNS" "$@" --bin "$MASSDNS_STUB" --skip-wildcard-filter --skip-va
 
     def test_tool_failure_propagates(self):
         result = self.run_helper(MOCK_EXIT="3")
-        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
         self.assertFalse(self.output.exists())
+
+    def test_puredns_timeout_status_is_preserved(self):
+        result = self.run_helper(MOCK_EXIT="124")
+        self.assertEqual(result.returncode, 124, result.stdout + result.stderr)
+        self.assertFalse(self.output.exists())
+
+    def test_puredns_resolve_failure_status_is_preserved(self):
+        for code in (7, 124):
+            with self.subTest(code=code):
+                result = self.run_helper(
+                    extra=f'puredns() {{ return {code}; }}',
+                    invocation='_resolve_domains "$WORDLIST" "$OUTPUT"',
+                )
+                self.assertEqual(result.returncode, code, result.stdout + result.stderr)
+                self.assertFalse(self.output.exists())
 
     def test_dry_run_does_not_execute_puredns(self):
         result = self.run_helper(DRY_RUN="true")

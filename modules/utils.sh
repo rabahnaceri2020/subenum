@@ -406,6 +406,8 @@ apply_scan_profile() {
     DNS_RESOLVE_TIMEOUT="${DEEP_DNS_RESOLVE_TIMEOUT:-4h}"
     TLS_ENUM_TIMEOUT="${DEEP_TLS_ENUM_TIMEOUT:-5m}"
     PUREDNS_WILDCARDTEST_LIMIT="${DEEP_PUREDNS_WILDCARDTEST_LIMIT:-30}"
+    DNSX_QUERY_TIMEOUT="${DEEP_DNSX_QUERY_TIMEOUT:-3s}"
+    DNSX_RETRIES="${DEEP_DNSX_RETRIES:-2}"
 }
 
 # Evaluate and cache the DNS resolver selection once per run.
@@ -513,6 +515,79 @@ _run_dns_with_heartbeat() {
     fi
 }
 
+# DNSX treats resolver-file comments as server addresses. Build a private,
+# per-command copy without changing the user's resolver file or endpoint choices.
+_prepare_dnsx_resolvers() {
+    if awk '
+        /^[[:space:]]*#/ { next }
+        {
+            sub(/[[:space:]]+#.*/, "")
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "")
+            if (length($0) && !seen[$0]++) print
+        }
+    ' "$resolvers_trusted" >"$1" && [[ -s "$1" ]]; then
+        return 0
+    fi
+    print_errorf "No usable DNSX resolver entries in: %s" "$resolvers_trusted"
+    return 1
+}
+
+# Common DNSX file job: fresh output, cleaned resolvers, exact failure status.
+_run_dnsx_file_job() {
+    local label="$1" timeout_value="$2" output_file="$3"
+    shift 3
+    local resolver_file raw_output_file rc=0
+    # Explicit -a and a host template keep NOERROR/NODATA out of the output.
+    local -a dnsx_command=(dnsx "$@" -silent -nc -a -rcode noerror -ot '{{host}}'
+        -retry "${DNSX_RETRIES:-2}" -timeout "${DNSX_QUERY_TIMEOUT:-1s}"
+        -t "${DNSX_THREADS:-25}" -rl "${DNSX_RATE_LIMIT:-100}"
+        -auto-wildcard -wt 5 -duc)
+    if [[ "${DRY_RUN:-false}" == "true" ]]; then
+        _run_dns_with_heartbeat "$label" "$timeout_value" "${dnsx_command[@]}" \
+            -r "$resolvers_trusted" -o "$output_file"
+        return $?
+    fi
+    resolver_file=$(mktemp "${output_file}.resolvers.XXXXXX") || return 1
+    if ! _prepare_dnsx_resolvers "$resolver_file"; then
+        rm -f -- "$resolver_file"
+        return 1
+    fi
+    raw_output_file=$(mktemp "${output_file}.dnsx.raw.XXXXXX") || {
+        rm -f -- "$resolver_file"
+        return 1
+    }
+
+    # Reject NXDOMAIN before expensive wildcard lookups, without skipping
+    # wildcard filtering on successful answers.
+    _run_dns_with_heartbeat "$label" "$timeout_value" "${dnsx_command[@]}" \
+        -r "$resolver_file" -o "$raw_output_file" || rc=$?
+    rm -f -- "$resolver_file"
+    if ((rc != 0)); then
+        # The tool's buffered output may be partial; never publish it as success.
+        if [[ -s "$raw_output_file" ]]; then
+            print_warnf "Incomplete DNSX output retained for diagnosis: %s" "$raw_output_file"
+        else
+            rm -f -- "$raw_output_file"
+        fi
+        return "$rc"
+    fi
+    # Normalize only the fresh file, then publish atomically. A sort/rename
+    # failure must not truncate a previous result or move output into a directory.
+    LC_ALL=C sort -u "$raw_output_file" -o "$raw_output_file" || rc=$?
+    if ((rc == 0)); then
+        if [[ -d "$output_file" ]]; then
+            rc=1
+        else
+            mv -- "$raw_output_file" "$output_file" || rc=$?
+        fi
+    fi
+    if ((rc != 0)); then
+        print_warnf "DNSX output could not be published; retained: %s" "$raw_output_file"
+        return "$rc"
+    fi
+    return 0
+}
+
 # Resolve a list of domains using the auto-selected resolver.
 # Usage: _resolve_domains <input_file> <output_file>
 _resolve_domains() {
@@ -523,20 +598,8 @@ _resolve_domains() {
     _ensure_dns_resolver_files "$resolver" || return 1
 
     if [[ "$resolver" == "dnsx" ]]; then
-        local raw_output_file="${output_file}.dnsx.raw"
-        if ! _run_dns_with_heartbeat "dns resolve (${resolver})" "${DNS_RESOLVE_TIMEOUT:-0}" \
-            dnsx -l "$input_file" -silent -retry 2 \
-            -t "${DNSX_THREADS:-25}" -rl "${DNSX_RATE_LIMIT:-100}" \
-            -r "$resolvers_trusted" -auto-wildcard -wt 5 -duc -o "$raw_output_file"; then
-            rm -f "$raw_output_file" 2>/dev/null || true
-            return 1
-        fi
-        if [[ -s "$raw_output_file" ]]; then
-            cut -d' ' -f1 "$raw_output_file" | sort -u >"$output_file"
-        else
-            : >"$output_file"
-        fi
-        rm -f "$raw_output_file" 2>/dev/null || true
+        _run_dnsx_file_job "dns resolve (${resolver})" "${DNS_RESOLVE_TIMEOUT:-0}" "$output_file" \
+            -l "$input_file"
     else
         _run_dns_with_heartbeat "dns resolve (${resolver})" "${DNS_RESOLVE_TIMEOUT:-0}" \
             puredns resolve "$input_file" -w "$output_file" \
@@ -544,7 +607,7 @@ _resolve_domains() {
             -l "$PUREDNS_PUBLIC_LIMIT" --rate-limit-trusted "$PUREDNS_TRUSTED_LIMIT" \
             --wildcard-tests "$PUREDNS_WILDCARDTEST_LIMIT" \
             --wildcard-batch "$PUREDNS_WILDCARDBATCH_LIMIT" \
-            || return 1
+            || return $?
     fi
 }
 
@@ -559,20 +622,8 @@ _bruteforce_domains() {
     _ensure_dns_resolver_files "$resolver" || return 1
 
     if [[ "$resolver" == "dnsx" ]]; then
-        local raw_output_file="${output_file}.dnsx.raw"
-        if ! _run_dns_with_heartbeat "dns bruteforce (${resolver})" "${DNS_BRUTE_TIMEOUT:-0}" \
-            dnsx -d "$target_domain" -w "$wordlist" -silent -retry 2 \
-            -t "${DNSX_THREADS:-25}" -rl "${DNSX_RATE_LIMIT:-100}" \
-            -r "$resolvers_trusted" -auto-wildcard -wt 5 -duc -o "$raw_output_file"; then
-            rm -f "$raw_output_file" 2>/dev/null || true
-            return 1
-        fi
-        if [[ -s "$raw_output_file" ]]; then
-            cut -d' ' -f1 "$raw_output_file" | sort -u >"$output_file"
-        else
-            : >"$output_file"
-        fi
-        rm -f "$raw_output_file" 2>/dev/null || true
+        _run_dnsx_file_job "dns bruteforce (${resolver})" "${DNS_BRUTE_TIMEOUT:-0}" "$output_file" \
+            -d "$target_domain" -w "$wordlist"
     else
         # PureDNS prioritizes piped stdin over positional arguments. Disconnect
         # inherited stdin so the wordlist path is never mistaken for the domain.
@@ -582,6 +633,6 @@ _bruteforce_domains() {
             -l "$PUREDNS_PUBLIC_LIMIT" --rate-limit-trusted "$PUREDNS_TRUSTED_LIMIT" \
             --wildcard-tests "$PUREDNS_WILDCARDTEST_LIMIT" \
             --wildcard-batch "$PUREDNS_WILDCARDBATCH_LIMIT" </dev/null \
-            || return 1
+            || return $?
     fi
 }

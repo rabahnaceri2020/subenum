@@ -20,11 +20,11 @@ _get_local_ip() { printf '203.0.113.7\n'; }
 _can_use_puredns() { [[ "$TEST_NAT" == "no" ]]; }
 _is_behind_nat() { [[ "$TEST_NAT" == "yes" ]]; }
 '''
-FIELDS = ["deep", "resolver", "brute", "resolve", "tls", "passive", "wildcards", "rate"]
+FIELDS = ["deep", "resolver", "brute", "resolve", "tls", "passive", "wildcards", "rate", "query_timeout", "retries"]
 CAPTURE = r'''
 printf '%s\n' "${DEEP:-false}" "$(_select_dns_resolver)" "$DNS_BRUTE_TIMEOUT" \
     "$DNS_RESOLVE_TIMEOUT" "$TLS_ENUM_TIMEOUT" "$SUBFINDER_ENUM_TIMEOUT" \
-    "$PUREDNS_WILDCARDTEST_LIMIT" "$DNSX_RATE_LIMIT" >"$PROFILE_CAPTURE"
+    "$PUREDNS_WILDCARDTEST_LIMIT" "$DNSX_RATE_LIMIT" "$DNSX_QUERY_TIMEOUT" "$DNSX_RETRIES" >"$PROFILE_CAPTURE"
 '''
 
 
@@ -62,7 +62,7 @@ class ScanProfileTests(unittest.TestCase):
     def test_normal_vps_uses_fast_dnsx_and_budgets(self):
         self.assertEqual(self.profile(), dict(
             deep="false", resolver="dnsx", brute="90s", resolve="60s", tls="30s",
-            passive="2", wildcards="5", rate="500",
+            passive="2", wildcards="5", rate="500", query_timeout="1s", retries="2",
         ))
 
     def test_normal_nat_uses_dnsx(self):
@@ -71,7 +71,7 @@ class ScanProfileTests(unittest.TestCase):
     def test_deep_vps_restores_thorough_budgets_and_puredns(self):
         self.assertEqual(self.profile("DEEP=true"), dict(
             deep="true", resolver="puredns", brute="6h", resolve="4h", tls="5m",
-            passive="180", wildcards="30", rate="500",
+            passive="180", wildcards="30", rate="500", query_timeout="3s", retries="2",
         ))
 
     def test_deep_nat_still_uses_dnsx(self):
@@ -98,8 +98,12 @@ class ScanProfileTests(unittest.TestCase):
         self.assertEqual([actual[k] for k in ["brute", "resolve", "tls", "passive"]], ["17s", "9s", "11s", "1"])
 
     def test_custom_deep_budgets_are_applied(self):
-        actual = self.profile('DEEP=true; DEEP_DNS_BRUTE_TIMEOUT=7m; DEEP_DNS_RESOLVE_TIMEOUT=3m; DEEP_PUREDNS_WILDCARDTEST_LIMIT=12')
-        self.assertEqual([actual[k] for k in ["brute", "resolve", "wildcards"]], ["7m", "3m", "12"])
+        actual = self.profile('DEEP=true; DEEP_DNS_BRUTE_TIMEOUT=7m; DEEP_DNS_RESOLVE_TIMEOUT=3m; DEEP_PUREDNS_WILDCARDTEST_LIMIT=12; DEEP_DNSX_QUERY_TIMEOUT=5s; DEEP_DNSX_RETRIES=4')
+        self.assertEqual([actual[k] for k in ["brute", "resolve", "wildcards", "query_timeout", "retries"]], ["7m", "3m", "12", "5s", "4"])
+
+    def test_custom_normal_dns_query_settings_are_preserved(self):
+        actual = self.profile('DNSX_QUERY_TIMEOUT=750ms; DNSX_RETRIES=3')
+        self.assertEqual([actual[k] for k in ["query_timeout", "retries"]], ["750ms", "3"])
 
     def test_profile_does_not_enable_disabled_methods(self):
         self.run_shell('DEEP=true; SUBPERMUTE=false; NS_DELEGATION=false; apply_scan_profile; '
@@ -132,6 +136,11 @@ printf 'www\n' >words.txt
                 self.assertEqual(args[1:3], [budget, 'dnsx'])
                 self.assertIn('-auto-wildcard', args)
                 self.assertIn('-duc', args)
+                self.assertIn('-a', args)
+                self.assertEqual(args[args.index('-rcode') + 1], 'noerror')
+                self.assertEqual(args[args.index('-ot') + 1], '{{host}}')
+                self.assertEqual(args[args.index('-timeout') + 1], '1s')
+                self.assertEqual(args[args.index('-retry') + 1], '2')
                 self.assertEqual((self.work / 'output.txt').read_text(), 'www.example.test\n')
 
     @unittest.skipUnless(shutil.which("timeout"), "GNU timeout required")
@@ -149,7 +158,7 @@ printf 'www.example.test\n' >input.txt
 printf 'previous.example.test\n' >output.txt
 _resolve_domains input.txt output.txt
 status=$?
-[[ "$status" == 1 ]] || exit 91
+[[ "$status" == 124 ]] || exit 91
 ''', PATH=str(binary) + os.pathsep + os.environ.get('PATH', ''),
                        TEST_TIMEOUT_CMD=shutil.which('timeout'))
         self.assertEqual((self.work / 'output.txt').read_text(), 'previous.example.test\n')
