@@ -78,7 +78,8 @@ function help() {
     printf "   -o, --output <path>         Output root (default: ./Recon)\n"
     printf " \n"
     printf " %bENUMERATION OPTIONS%b\n" "${bblue:-}" "${reset:-}"
-    printf "   --deep                      Deep scan (DNS recon, bigger wordlist, more permutations)\n"
+    printf "   Default: fast scan (short wordlist, dnsx, bounded DNS/TLS stages)\n"
+    printf "   --deep                      Thorough scan (permutations, DNS recon, NS/AXFR, larger wordlist)\n"
     printf "   --only <m1,m2,...>          Run only the given methods (see METHODS below)\n"
     printf "   --no-parallel               Force sequential execution\n"
     printf "   --parallel                  Run independent phases in parallel (default)\n"
@@ -102,7 +103,8 @@ function help() {
     printf "   sub_passive, sub_crt, sub_active, sub_tls, sub_noerror, sub_srv, sub_dns,\n"
     printf "   sub_brute, sub_permut, sub_regex_permut, sub_ia_permut,\n"
     printf "   sub_recursive_passive, sub_recursive_brute, sub_ns_delegation\n"
-    printf "   sub_dns requires --deep (disabled in normal scans)\n"
+    printf "   sub_dns, sub_permut, sub_regex_permut, sub_ia_permut and sub_ns_delegation\n"
+    printf "   require --deep (disabled in normal scans, including with --only)\n"
     printf " \n"
     printf " %bOUTPUT%b\n" "${bblue:-}" "${reset:-}"
     printf "   <output-root>/<domain>/subdomains/subdomains.txt      All discovered subdomains\n"
@@ -388,6 +390,7 @@ fi
 if [[ $opt_deep ]]; then
     DEEP=true
 fi
+apply_scan_profile
 
 if [[ -n $rate_limit ]]; then
     DNSX_RATE_LIMIT=$rate_limit

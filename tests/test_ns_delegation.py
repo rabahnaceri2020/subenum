@@ -22,6 +22,7 @@ source "$SCRIPTPATH/modules/core.sh"
 source "$SCRIPTPATH/modules/subdomains.sh"
 
 ensure_dirs() { mkdir -p -- "$@"; }
+_method_selected() { [[ "${METHOD_SELECTED:-true}" == "true" ]]; }
 getElapsedTime() { :; }
 _print_msg() { printf '%s %s\n' "$1" "$2"; }
 _print_status() { printf '%s %s\n' "$1" "$2"; }
@@ -90,7 +91,7 @@ class NSDelegationTests(unittest.TestCase):
             resolvers_trusted=str(self.work / "resolvers.txt"),
             DRY_RUN="false",
             DIFF="false",
-            DEEP="false",
+            DEEP="true",
             NS_DELEGATION="true",
             NS_AXFR_MAX="50",
             INSCOPE="false",
@@ -114,6 +115,31 @@ class NSDelegationTests(unittest.TestCase):
         self.assertFalse(self.dig_calls.exists())
         self.assertEqual(result.stderr, "")
         self.assertNotIn("No such file or directory", self.log.read_text())
+
+    def test_default_mode_preserves_output_without_queries_or_checkpoint(self):
+        self.output.write_text("old.example.test\n")
+        result = self.run_stage(DEEP="false")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("SKIP mode", result.stdout)
+        self.assertEqual(self.output.read_text(), "old.example.test\n")
+        self.assertFalse(self.events.exists())
+        self.assertFalse(self.dig_calls.exists())
+        self.assertFalse(self.checkpoint.exists())
+        self.assertFalse(self.log.exists())
+
+    def test_unset_deep_defaults_to_skipping(self):
+        result = self.run_stage(extra="unset DEEP")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(self.output.exists())
+        self.assertFalse(self.events.exists())
+        self.assertFalse(self.checkpoint.exists())
+
+    def test_deep_mode_respects_method_selection(self):
+        result = self.run_stage(METHOD_SELECTED="false")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("SKIP mode", result.stdout)
+        self.assertFalse(self.events.exists())
+        self.assertFalse(self.checkpoint.exists())
 
     def test_apex_only_records_publish_empty_artifact_and_zero_count(self):
         result = self.run_stage()

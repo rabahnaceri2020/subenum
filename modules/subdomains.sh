@@ -13,10 +13,10 @@
 #   sub_srv               SRV record enumeration (dnsx)
 #   sub_dns               DNS recon + PTR pivots (--deep only; dnsx, hakip2host)
 #   sub_brute             DNS brute force (puredns/dnsx + wordlist)
-#   sub_ns_delegation     NS delegation + AXFR on delegated zones
-#   sub_permut            DNS permutations (gotator, 2 rounds)
-#   sub_regex_permut      Permutations by regex analysis (regulator)
-#   sub_ia_permut         Permutations by AI analysis (subwiz)
+#   sub_ns_delegation     NS delegation + AXFR on delegated zones (--deep only)
+#   sub_permut            DNS permutations (gotator, 2 rounds; --deep only)
+#   sub_regex_permut      Permutations by regex analysis (regulator; --deep only)
+#   sub_ia_permut         Permutations by AI analysis (subwiz; --deep only)
 #   sub_recursive_passive Recursive passive enumeration (dsieve + subfinder)
 #   sub_recursive_brute   Recursive brute force + permutations
 #
@@ -544,15 +544,22 @@ function sub_crt() {
 }
 
 function sub_active() {
-
-    ensure_dirs .tmp subdomains
-
     if [[ ! -f "$called_fn_dir/.${FUNCNAME[0]}" ]] || [[ $DIFF == true ]]; then
         start_subfunc "${FUNCNAME[0]}" "Running: Active Subdomain Enumeration"
+
+        if [[ "${DRY_RUN:-false}" == "true" ]]; then
+            end_subfunc "DNS resolution from passive (dry-run)" "${FUNCNAME[0]}"
+            return 0
+        fi
+        if ! ensure_dirs .tmp subdomains || ! : >.tmp/subdomains_tmp.txt; then
+            end_subfunc "Failed to reset active DNS output" "${FUNCNAME[0]}" "FAIL"
+            return 1
+        fi
 
         # Combine subdomain files into subs_no_resolved.txt
         if ! find .tmp -type f -iname "*_subs.txt" -exec cat {} + | anew -q .tmp/subs_no_resolved.txt; then
             print_warnf "Failed to collect subdomains into subs_no_resolved.txt."
+            end_subfunc "Failed to collect passive DNS candidates" "${FUNCNAME[0]}" "FAIL"
             return 1
         fi
 
@@ -560,15 +567,21 @@ function sub_active() {
         if [[ -s $outOfScope_file ]]; then
             if ! deleteOutScoped "$outOfScope_file" .tmp/subs_no_resolved.txt; then
                 print_warnf "deleteOutScoped command failed."
+                end_subfunc "Failed to filter passive DNS candidates" "${FUNCNAME[0]}" "FAIL"
                 return 1
             fi
         fi
 
         [[ $RESOLVER_IQ == true ]] && resolvers_optimize_local
 
-        # Resolve subdomains using puredns/dnsx
+        # Resolve subdomains using puredns/dnsx; partial failures stay retryable.
         if [[ -s ".tmp/subs_no_resolved.txt" ]]; then
-            _resolve_domains .tmp/subs_no_resolved.txt .tmp/subdomains_tmp.txt
+            local resolve_rc=0
+            _resolve_domains .tmp/subs_no_resolved.txt .tmp/subdomains_tmp.txt || resolve_rc=$?
+            if ((resolve_rc != 0)); then
+                end_subfunc "Active DNS resolution incomplete (exit ${resolve_rc})" "${FUNCNAME[0]}" "FAIL"
+                return "$resolve_rc"
+            fi
         fi
 
         echo "$domain" | run_command dnsx -retry 3 -silent -r "$resolvers_trusted" \
@@ -616,22 +629,32 @@ function sub_tls() {
     if [[ ! -f "$called_fn_dir/.${FUNCNAME[0]}" ]] || [[ $DIFF == true ]]; then
         start_subfunc "${FUNCNAME[0]}" "Running: TLS Active Subdomain Enumeration"
 
+        if [[ "${DRY_RUN:-false}" == "true" ]]; then
+            end_subfunc "TLS enumeration (dry-run)" "${FUNCNAME[0]}"
+            return 0
+        fi
+        # All three files belong to this run, including the deep-mode -o output.
+        if ! { : >.tmp/subdomains_tlsx.txt && : >.tmp/subdomains_tlsx_clean.txt && : >.tmp/subdomains_tlsx_resolved.txt; }; then
+            end_subfunc "Failed to reset TLS candidate files" "${FUNCNAME[0]}" "FAIL"
+            return 1
+        fi
         if [[ ! -s "subdomains/subdomains.txt" ]]; then
             _print_msg WARN "No subdomains available for TLS enumeration; skipping."
-            end_subfunc "0 new subs (tls active enum)" "${FUNCNAME[0]}" "SKIP"
-            return
+            end_subfunc "0 new subs (tls active enum)" "${FUNCNAME[0]}" "SKIP_NOINPUT"
+            return 0
         fi
 
-        # Always reset temp outputs to avoid stale data from previous runs.
-        : >".tmp/subdomains_tlsx_clean.txt"
-        : >".tmp/subdomains_tlsx_resolved.txt"
-
         print_notice RUN "sub_tls" "grabbing TLS certificates"
-        if [[ $DEEP == true ]]; then
+        local tls_rc=0
+        if [[ "${DEEP:-false}" == true ]]; then
             _enrich_input subdomains/subdomains.txt | _run_timed_command "${TLS_ENUM_TIMEOUT:-5m}" tlsx -san -cn -silent -ro -c "$TLSX_THREADS" \
-                -p "$TLS_PORTS" -o .tmp/subdomains_tlsx.txt 2>>"$LOGFILE" >/dev/null
+                -p "$TLS_PORTS" -o .tmp/subdomains_tlsx.txt 2>>"$LOGFILE" >/dev/null || tls_rc=$?
         else
-            _enrich_input subdomains/subdomains.txt | _run_timed_command "${TLS_ENUM_TIMEOUT:-5m}" tlsx -san -cn -silent -ro -c "$TLSX_THREADS" >.tmp/subdomains_tlsx.txt 2>>"$LOGFILE"
+            _enrich_input subdomains/subdomains.txt | _run_timed_command "${TLS_ENUM_TIMEOUT:-5m}" tlsx -san -cn -silent -ro -c "$TLSX_THREADS" >.tmp/subdomains_tlsx.txt 2>>"$LOGFILE" || tls_rc=$?
+        fi
+        if ((tls_rc != 0)); then
+            end_subfunc "TLS collection incomplete (exit ${tls_rc})" "${FUNCNAME[0]}" "FAIL"
+            return "$tls_rc"
         fi
 
         if [[ -s ".tmp/subdomains_tlsx.txt" ]]; then
@@ -645,12 +668,18 @@ function sub_tls() {
 
         [[ $RESOLVER_IQ == true ]] && resolvers_optimize_local
         if [[ -s ".tmp/subdomains_tlsx_clean.txt" ]]; then
-            _resolve_domains .tmp/subdomains_tlsx_clean.txt .tmp/subdomains_tlsx_resolved.txt
+            local resolve_rc=0
+            _resolve_domains .tmp/subdomains_tlsx_clean.txt .tmp/subdomains_tlsx_resolved.txt || resolve_rc=$?
+            if ((resolve_rc != 0)); then
+                end_subfunc "TLS DNS resolution incomplete (exit ${resolve_rc})" "${FUNCNAME[0]}" "FAIL"
+                return "$resolve_rc"
+            fi
         fi
 
         if [[ $INSCOPE == true ]]; then
             if ! check_inscope .tmp/subdomains_tlsx_resolved.txt 2>>"$LOGFILE" >/dev/null; then
                 print_warnf "check_inscope command failed."
+                end_subfunc "Failed to filter TLS results to scope" "${FUNCNAME[0]}" "FAIL"
                 return 1
             fi
         fi
@@ -890,34 +919,57 @@ function sub_dns() {
 }
 
 function sub_brute() {
-
-    ensure_dirs .tmp subdomains
-
     if { [[ ! -f "$called_fn_dir/.${FUNCNAME[0]}" ]] || [[ $DIFF == true ]]; } && [[ $SUBBRUTE == true ]]; then
         start_subfunc "${FUNCNAME[0]}" "Running: Bruteforce Subdomain Enumeration"
         print_notice RUN "sub_brute" "bruteforcing subdomains"
 
-        wordlist="$subs_wordlist"
-        [[ $DEEP == true ]] && wordlist="$subs_wordlist_big"
+        if ! ensure_dirs .tmp subdomains; then
+            end_subfunc "Failed to create brute output directories" "${FUNCNAME[0]}" "FAIL"
+            return 1
+        fi
 
+        local wordlist="$subs_wordlist"
+        [[ "${DEEP:-false}" == true ]] && wordlist="$subs_wordlist_big"
+
+        # Dry runs must not consume prior candidates or replace saved results.
+        if [[ "${DRY_RUN:-false}" == "true" ]]; then
+            log_note "sub_brute dry-run wordlist=${wordlist}" "${FUNCNAME[0]}" "${LINENO}"
+            end_subfunc "DNS bruteforce (dry-run)" "${FUNCNAME[0]}"
+            return 0
+        fi
+
+        # Both files are per-run scratch data, not a cache of prior candidates.
+        if ! { : >.tmp/subs_brute.txt && : >.tmp/subs_brute_valid.txt; }; then
+            end_subfunc "Failed to reset brute candidate files" "${FUNCNAME[0]}" "FAIL"
+            return 1
+        fi
         if [[ ! -s "$wordlist" ]]; then
             _print_msg WARN "Brute wordlist missing or empty: $wordlist (run ./install.sh --tools to fetch it)"
-            end_subfunc "0 new subs (bruteforce - missing wordlist)" "${FUNCNAME[0]}" "SKIP"
+            end_subfunc "0 new subs (bruteforce - missing wordlist)" "${FUNCNAME[0]}" "SKIP_NOINPUT"
             return 0
         fi
 
         log_note "sub_brute wordlist=${wordlist} entries=$(wc -l <"$wordlist" 2>/dev/null | tr -d ' ')" "${FUNCNAME[0]}" "${LINENO}"
-        if ! _bruteforce_domains "$wordlist" "$domain" .tmp/subs_brute.txt; then
-            _print_msg WARN "Bruteforce failed (wordlist: $wordlist) - see ${LOGFILE}"
+        local brute_rc=0
+        _bruteforce_domains "$wordlist" "$domain" .tmp/subs_brute.txt || brute_rc=$?
+        if ((brute_rc != 0)); then
+            _print_msg WARN "Bruteforce failed (exit ${brute_rc}, wordlist: $wordlist) - see ${LOGFILE}"
+            end_subfunc "DNS bruteforce incomplete (exit ${brute_rc})" "${FUNCNAME[0]}" "FAIL"
+            return "$brute_rc"
         fi
 
-        if [[ -s ".tmp/subs_brute.txt" ]]; then
-            _resolve_domains .tmp/subs_brute.txt .tmp/subs_brute_valid.txt
+        # dnsx filters wildcard responses and puredns validates its results;
+        # do not issue a second DNS pass over already validated brute output.
+        if ! cp -- .tmp/subs_brute.txt .tmp/subs_brute_valid.txt; then
+            end_subfunc "Failed to prepare validated brute results" "${FUNCNAME[0]}" "FAIL"
+            return 1
         fi
 
         if [[ $INSCOPE == true ]] && [[ -s ".tmp/subs_brute_valid.txt" ]]; then
             if ! check_inscope .tmp/subs_brute_valid.txt 2>>"$LOGFILE" >/dev/null; then
                 print_warnf "check_inscope command failed."
+                end_subfunc "Failed to filter brute results to scope" "${FUNCNAME[0]}" "FAIL"
+                return 1
             fi
         fi
 
@@ -952,6 +1004,11 @@ function sub_brute() {
 }
 
 function sub_ns_delegation() {
+    if [[ "${DEEP:-false}" != "true" ]] || ! _method_selected "${FUNCNAME[0]}"; then
+        skip_notification "mode"
+        return 0
+    fi
+
     ensure_dirs .tmp subdomains
 
     if { [[ ! -f "$called_fn_dir/.${FUNCNAME[0]}" ]] || [[ $DIFF == true ]]; } && [[ ${NS_DELEGATION:-true} == true ]]; then
@@ -1106,6 +1163,10 @@ _permutations_allowed() {
 }
 
 function sub_permut() {
+    if [[ "${DEEP:-false}" != "true" ]] || ! _method_selected "${FUNCNAME[0]}"; then
+        skip_notification "mode"
+        return 0
+    fi
 
     ensure_dirs .tmp subdomains
 
@@ -1186,6 +1247,10 @@ function sub_permut() {
 }
 
 function sub_regex_permut() {
+    if [[ "${DEEP:-false}" != "true" ]] || ! _method_selected "${FUNCNAME[0]}"; then
+        skip_notification "mode"
+        return 0
+    fi
 
     if ! mkdir -p .tmp subdomains; then
         print_warnf "Failed to create directories."
@@ -1254,6 +1319,10 @@ function sub_regex_permut() {
 }
 
 function sub_ia_permut() {
+    if [[ "${DEEP:-false}" != "true" ]] || ! _method_selected "${FUNCNAME[0]}"; then
+        skip_notification "mode"
+        return 0
+    fi
 
     if ! mkdir -p .tmp subdomains; then
         print_warnf "Failed to create directories."

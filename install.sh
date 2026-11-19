@@ -650,16 +650,16 @@ function download_required_files() {
         retry 3 3 q_to 120 wget -q -O "$resolvers_trusted" "$resolvers_trusted_url" || msg_err "Failed to download trusted resolvers"
     fi
 
-    # Default brute-force wordlist (n0kovo small, ~200k entries): expand the
-    # vendored .gz, or download it if absent.
+    # Default brute-force wordlist (SecLists top 5,000): expand the vendored
+    # .gz, or download it if absent. Preserve existing custom plaintext lists.
     if [[ ! -s "${WORDLISTS_DIR}/subdomains.txt" ]]; then
         if [[ -s "${WORDLISTS_DIR}/subdomains.txt.gz" ]]; then
             printf "%bExpanding subdomains wordlist...%b\n" "$yellow" "$reset"
             gzip -dc "${WORDLISTS_DIR}/subdomains.txt.gz" >"${WORDLISTS_DIR}/subdomains.txt"
         else
-            printf "%bFetching default subdomains wordlist...%b\n" "$yellow" "$reset"
+            printf "%bFetching SecLists top-5000 subdomains wordlist...%b\n" "$yellow" "$reset"
             retry 3 3 q_to 300 wget -q -O "${WORDLISTS_DIR}/subdomains.txt" \
-                "https://raw.githubusercontent.com/n0kovo/n0kovo_subdomains/main/n0kovo_subdomains_small.txt" \
+                "https://raw.githubusercontent.com/danielmiessler/SecLists/master/Discovery/DNS/subdomains-top1million-5000.txt" \
                 || msg_err "Failed to download default subdomains wordlist"
         fi
     fi

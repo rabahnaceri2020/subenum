@@ -397,6 +397,17 @@ _is_behind_nat() {
     return 0
 }
 
+# Apply once after loading config and CLI overrides. Normal mode keeps the
+# configured fast budgets; --deep explicitly opts into the larger budgets.
+apply_scan_profile() {
+    [[ "${DEEP:-false}" == "true" ]] || return 0
+    SUBFINDER_ENUM_TIMEOUT="${DEEP_SUBFINDER_ENUM_TIMEOUT:-180}"
+    DNS_BRUTE_TIMEOUT="${DEEP_DNS_BRUTE_TIMEOUT:-6h}"
+    DNS_RESOLVE_TIMEOUT="${DEEP_DNS_RESOLVE_TIMEOUT:-4h}"
+    TLS_ENUM_TIMEOUT="${DEEP_TLS_ENUM_TIMEOUT:-5m}"
+    PUREDNS_WILDCARDTEST_LIMIT="${DEEP_PUREDNS_WILDCARDTEST_LIMIT:-30}"
+}
+
 # Evaluate and cache the DNS resolver selection once per run.
 init_dns_resolver() {
     local mode="${DNS_RESOLVER:-auto}"
@@ -416,7 +427,7 @@ init_dns_resolver() {
         *)
             [[ "$mode" != "auto" && -n "$mode" ]] && \
                 print_warnf "DNS_RESOLVER invalid: '%s' (use auto|puredns|dnsx). Defaulting to auto." "$mode"
-            if [[ "$RECON_BEHIND_NAT" == "no" ]]; then
+            if [[ "${DEEP:-false}" == "true" && "$RECON_BEHIND_NAT" == "no" ]]; then
                 DNS_RESOLVER_SELECTED="puredns"
             else
                 DNS_RESOLVER_SELECTED="dnsx"
@@ -429,14 +440,17 @@ init_dns_resolver() {
         "$(date +'%Y-%m-%d %H:%M:%S')" "$DNS_RESOLVER_SELECTED" "${DNS_RESOLVER:-auto}" "${ip:-}" "$RECON_BEHIND_NAT" >>"${LOGFILE:-/dev/null}"
 }
 
-# Return "puredns" or "dnsx" based on config and NAT detection.
+# Explicit choices win. Auto favors dnsx for fast normal scans and uses NAT
+# detection for thorough --deep scans (puredns on VPS, dnsx behind NAT).
 _select_dns_resolver() {
     local mode="${DNS_RESOLVER:-auto}"
     case "$mode" in
         puredns) echo "puredns" ;;
         dnsx)    echo "dnsx" ;;
         *)
-            if [[ -n "${DNS_RESOLVER_SELECTED:-}" ]]; then
+            if [[ "${DEEP:-false}" != "true" ]]; then
+                echo "dnsx"
+            elif [[ -n "${DNS_RESOLVER_SELECTED:-}" ]]; then
                 echo "$DNS_RESOLVER_SELECTED"
             elif _is_behind_nat; then
                 echo "dnsx"
@@ -513,7 +527,7 @@ _resolve_domains() {
         if ! _run_dns_with_heartbeat "dns resolve (${resolver})" "${DNS_RESOLVE_TIMEOUT:-0}" \
             dnsx -l "$input_file" -silent -retry 2 \
             -t "${DNSX_THREADS:-25}" -rl "${DNSX_RATE_LIMIT:-100}" \
-            -r "$resolvers_trusted" -wt 5 -o "$raw_output_file"; then
+            -r "$resolvers_trusted" -auto-wildcard -wt 5 -duc -o "$raw_output_file"; then
             rm -f "$raw_output_file" 2>/dev/null || true
             return 1
         fi
@@ -549,7 +563,7 @@ _bruteforce_domains() {
         if ! _run_dns_with_heartbeat "dns bruteforce (${resolver})" "${DNS_BRUTE_TIMEOUT:-0}" \
             dnsx -d "$target_domain" -w "$wordlist" -silent -retry 2 \
             -t "${DNSX_THREADS:-25}" -rl "${DNSX_RATE_LIMIT:-100}" \
-            -r "$resolvers_trusted" -wt 5 -o "$raw_output_file"; then
+            -r "$resolvers_trusted" -auto-wildcard -wt 5 -duc -o "$raw_output_file"; then
             rm -f "$raw_output_file" 2>/dev/null || true
             return 1
         fi
