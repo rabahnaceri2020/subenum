@@ -560,12 +560,14 @@ _bruteforce_domains() {
         fi
         rm -f "$raw_output_file" 2>/dev/null || true
     else
+        # PureDNS prioritizes piped stdin over positional arguments. Disconnect
+        # inherited stdin so the wordlist path is never mistaken for the domain.
         _run_dns_with_heartbeat "dns bruteforce (${resolver})" "${DNS_BRUTE_TIMEOUT:-0}" \
             puredns bruteforce "$wordlist" "$target_domain" \
             -w "$output_file" -r "$resolvers" --resolvers-trusted "$resolvers_trusted" \
             -l "$PUREDNS_PUBLIC_LIMIT" --rate-limit-trusted "$PUREDNS_TRUSTED_LIMIT" \
             --wildcard-tests "$PUREDNS_WILDCARDTEST_LIMIT" \
-            --wildcard-batch "$PUREDNS_WILDCARDBATCH_LIMIT" \
+            --wildcard-batch "$PUREDNS_WILDCARDBATCH_LIMIT" </dev/null \
             || return 1
     fi
 }

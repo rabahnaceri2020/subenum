@@ -957,6 +957,14 @@ function sub_ns_delegation() {
     if { [[ ! -f "$called_fn_dir/.${FUNCNAME[0]}" ]] || [[ $DIFF == true ]]; } && [[ ${NS_DELEGATION:-true} == true ]]; then
         start_subfunc "${FUNCNAME[0]}" "Running: NS Delegation Zone Transfer Check"
 
+        # Publish this run's result even when no delegated zones are found.
+        # Reset before early exits so prior runs never supply a stale count.
+        if [[ "${DRY_RUN:-false}" != "true" ]] && ! : >subdomains/ns_delegated_zones.txt; then
+            _print_msg WARN "Failed to reset NS delegated-zone output."
+            end_subfunc "Failed to reset NS delegated-zone output" "${FUNCNAME[0]}" "FAIL"
+            return 1
+        fi
+
         if [[ ! -s "subdomains/subdomains.txt" ]]; then
             _print_msg WARN "No subdomains available for NS delegation check; skipping."
             end_subfunc "0 new subs (ns delegation)" "${FUNCNAME[0]}" "SKIP"
@@ -1004,7 +1012,11 @@ function sub_ns_delegation() {
         done < .tmp/ns_delegation_raw.txt
 
         if [[ -s ".tmp/ns_delegated_zones.txt" ]]; then
-            sort -u .tmp/ns_delegated_zones.txt -o subdomains/ns_delegated_zones.txt
+            if ! sort -u .tmp/ns_delegated_zones.txt -o subdomains/ns_delegated_zones.txt; then
+                _print_msg WARN "Failed to write NS delegated-zone output."
+                end_subfunc "Failed to write NS delegated-zone output" "${FUNCNAME[0]}" "FAIL"
+                return 1
+            fi
         fi
 
         NUMOFLINES=0
