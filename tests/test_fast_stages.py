@@ -215,7 +215,8 @@ class FastStageTests(unittest.TestCase):
 
     def assert_mode_skip(self, method, result):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("SKIP " + method, result.stdout)
+        self.assertNotIn("SKIP", result.stdout)
+        self.assertNotIn("reason:", result.stdout)
         self.assertEqual(self.event_lines(), [])
         self.assertFalse(self.checkpoint(method).exists())
         reason = self.work / ".called_fn" / (".status_reason_" + method)

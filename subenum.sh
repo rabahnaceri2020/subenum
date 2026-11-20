@@ -94,8 +94,9 @@ function help() {
     printf "   --verbose                   Extra output\n"
     printf "   --no-color                  Disable colors\n"
     printf "   --check-tools               Exit if one of the tools is missing\n"
-    printf "   --show-cache                Show cached/skipped method lines\n"
-    printf "   --no-banner                 Disable banner\n"
+    printf "   --show-cache                Show cached method lines (skips stay hidden)\n"
+    printf "   --banner                    Show the optional startup banner\n"
+    printf "   --no-banner                 Hide startup banner (default)\n"
     printf "   --legal                     Show legal note\n"
     printf "   -h, --help                  Show this help\n"
     printf " \n"
@@ -151,7 +152,7 @@ fi
 opt_mode='s'
 ONLY_METHODS=""
 OUTPUT_ROOT=""
-SHOW_BANNER=true
+SHOW_BANNER=false
 SHOW_LEGAL=false
 HELP_REQUESTED=false
 CLI_OUTPUT_VERBOSITY=""

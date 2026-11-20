@@ -138,7 +138,6 @@ for domain in $(cat "$DOMAIN_LIST"); do
 
     # Skip if no new subdomains
     if [[ ! -s "$out_new" ]]; then
-        log "No new subdomains found for $domain, skipping..."
         continue
     fi
 
@@ -172,8 +171,6 @@ for domain in $(cat "$DOMAIN_LIST"); do
         elapsed=$(($(date +%s) - start_time))
         js_count=$(wc -l < "$OUT_DIR/$domain.jsurls" 2>/dev/null || echo 0)
         log "katana: ${js_count} JS files (${elapsed}s)"
-    else
-        log "Skipping katana (no httpx results)"
     fi
 
     # Run Nuclei Credentials Scan (findings stream live via tee)
@@ -187,16 +184,12 @@ for domain in $(cat "$DOMAIN_LIST"); do
         if [[ -s "$OUT_DIR/$domain.tokens" ]]; then
             notify_file -data "$OUT_DIR/$domain.tokens" -id "$NOTIFY_ID_TOKENS" -bulk
         fi
-    else
-        log "Skipping credentials scan (no JS files found)"
     fi
 
     # Run Full Nuclei Scan (findings stream live via tee)
-    if [[ ! -s "$OUT_DIR/$domain.httpx" ]]; then
-        log "Skipping full nuclei scan (no httpx results)"
-    elif [[ ! -d "$NUCLEI_TEMPLATES" ]]; then
+    if [[ -s "$OUT_DIR/$domain.httpx" && ! -d "$NUCLEI_TEMPLATES" ]]; then
         log "WARNING: nuclei templates not found at $NUCLEI_TEMPLATES - skipping full nuclei scan"
-    else
+    elif [[ -s "$OUT_DIR/$domain.httpx" ]]; then
         log "Running full nuclei scan..."
         start_time=$(date +%s)
         cut -d " " -f 1 "$OUT_DIR/$domain.httpx" | nuclei -t "$NUCLEI_TEMPLATES" $NUCLEI_EXTRA_OPTS -si "$NUCLEI_STATS_INTERVAL" -etags "$NUCLEI_EXCLUDE_TAGS" -es "$NUCLEI_EXCLUDE_SEVERITY" -eid "$NUCLEI_EXCLUDE_IDS" | tee "$OUT_DIR/$domain.nuclei" &

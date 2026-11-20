@@ -223,9 +223,9 @@ function end_subfunc() {
         fi
     fi
 
-    if [[ "${OUTPUT_VERBOSITY:-1}" -ge 1 ]]; then
+    if [[ "${OUTPUT_VERBOSITY:-1}" -ge 1 ]] && _task_status_visible "$badge"; then
         _print_status "$badge" "${2}" "${duration}s"
-        if [[ -n "$reason_code" ]] && { [[ "$badge" != "CACHE" ]] || [[ "${SHOW_CACHE:-false}" == "true" ]]; }; then
+        if [[ -n "$reason_code" ]]; then
             printf "         reason: %s\n" "$reason_code"
         fi
     fi

@@ -95,14 +95,8 @@ ui_header() {
     local target="${domain:-unknown}" outdir="${dir:-unknown}"
     local started
     started=$(date +'%Y-%m-%d %H:%M:%S')
-    local width rule="" i
+    local width
     width=$(ui_term_width)
-    for ((i = 0; i < width; i++)); do
-        rule+="─"
-    done
-    printf "%b%s%b\n" "${bgreen:-}" "$rule" "${reset:-}"
-    printf "%b%s%b\n" "${bgreen:-}" "$(ui_truncate_text "subenum ${subenum_version:-} | Authorized testing only" "$width")" "${reset:-}"
-    printf "%b%s%b\n" "${bgreen:-}" "$rule" "${reset:-}"
     printf "%s\n" "$(ui_truncate_text "Mode: SUBDOMAINS | Target: ${target} | Parallel: ${PARALLEL_MODE:-true} | Jobs: ${PARALLEL_MAX_JOBS:-4}" "$width")"
     printf "%s\n" "$(ui_truncate_text "Output: ${outdir}" "$width")"
     if [[ -n "${RECON_BEHIND_NAT:-}" ]] || [[ -n "${DNS_RESOLVER_SELECTED:-}" ]]; then

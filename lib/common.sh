@@ -72,9 +72,20 @@ _truncate_with_ellipsis() {
     printf "%s..." "${text:0:max-3}"
 }
 
+# Keep non-executed stages out of the terminal without changing their state.
+# Cached outcomes are shown only when explicitly requested with --show-cache.
+_task_status_visible() {
+    case "$1" in
+        SKIP|SKIP_*) return 1 ;;
+        CACHE|CACHE_HIT) [[ "${SHOW_CACHE:-false}" == "true" ]] ;;
+        *) return 0 ;;
+    esac
+}
+
 # Print a normalized status line: STATE module duration reason
 print_task() {
     [[ "${OUTPUT_VERBOSITY:-1}" -lt 1 ]] && return 0
+    _task_status_visible "$1" || return 0
     _ui_live_break_if_needed
     local state="$1" module="$2" duration="${3:-0}" reason="${4:-}"
     local color
@@ -283,19 +294,11 @@ skip_notification() {
             ;;
     esac
 
-    if [[ "${OUTPUT_VERBOSITY:-1}" -ge 1 ]]; then
+    if [[ "${OUTPUT_VERBOSITY:-1}" -ge 1 ]] && _task_status_visible "$badge"; then
         _print_status "$badge" "$func_name" "0s"
-        if [[ "$badge" == "SKIP" ]]; then
-            printf "         reason: %s\n" "$reason_code"
-        elif [[ "$badge" == "CACHE" ]] && [[ "${SHOW_CACHE:-false}" == "true" ]]; then
-            printf "         reason: %s\n" "$reason_code"
-        fi
+        printf "         reason: %s\n" "$reason_code"
         if [[ "${OUTPUT_VERBOSITY:-1}" -ge 2 ]]; then
-            if [[ "$badge" == "CACHE" ]]; then
-                _print_msg INFO "${func_name} already processed. To force re-run, delete: ${called_fn_dir:-.}/.${func_name}"
-            else
-                _print_msg INFO "${func_name} skipped: ${reason}"
-            fi
+            _print_msg INFO "${func_name} already processed. To force re-run, delete: ${called_fn_dir:-.}/.${func_name}"
         fi
     fi
 

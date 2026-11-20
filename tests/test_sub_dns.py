@@ -144,7 +144,8 @@ class DNSOutputTests(unittest.TestCase):
 
     def assert_mode_skip(self, result, checkpoint=False):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("SKIP sub_dns", result.stdout)
+        self.assertNotIn("SKIP", result.stdout)
+        self.assertNotIn("reason:", result.stdout)
         self.assertEqual(self.output.read_text(), self.old_data)
         self.assertFalse(self.events.exists())
         self.assertEqual(self.partial_files(), [])

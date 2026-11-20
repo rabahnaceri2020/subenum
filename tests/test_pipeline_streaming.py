@@ -349,7 +349,8 @@ class PipelineStreamingTests(unittest.TestCase):
         (self.data / (DOMAIN + ".txt.all")).write_text("\n".join(SUBDOMAINS) + "\n")
         runner = self.start()
         self.assert_finished(runner)
-        self.assertTrue(any("No new subdomains found" in line for line in runner.lines))
+        self.assertTrue(any("Found 0 new subdomains" in line for line in runner.lines))
+        self.assertFalse(any("skipping" in line.lower() for line in runner.lines))
         self.assertEqual(self.saved(".txt.new"), [])
         self.assertEqual(self.saved(".txt.all"), SUBDOMAINS)
         self.assertEqual([record["tool"] for record in self.records()], ["subenum", "anew", "git", "git"])
@@ -362,9 +363,8 @@ class PipelineStreamingTests(unittest.TestCase):
         self.assert_finished(runner)
         self.assertEqual(self.saved(".httpx"), [])
         self.assertEqual([record["tool"] for record in self.records()], ["subenum", "anew", "httpx", "git", "git"])
-        self.assertTrue(any("Skipping katana" in line for line in runner.lines))
-        self.assertTrue(any("Skipping credentials scan" in line for line in runner.lines))
-        self.assertTrue(any("Skipping full nuclei scan" in line for line in runner.lines))
+        self.assertTrue(any("0 unique responses" in line for line in runner.lines))
+        self.assertFalse(any("skipping" in line.lower() for line in runner.lines))
 
     def test_empty_katana_skips_credentials_but_keeps_full_nuclei(self):
         self.config["katana"] = []
@@ -376,7 +376,8 @@ class PipelineStreamingTests(unittest.TestCase):
         nuclei = [record for record in self.records() if record["tool"] == "nuclei"]
         self.assertEqual([record["phase"] for record in nuclei], ["full"])
         self.assertEqual(nuclei[0]["input"], HTTP_URLS)
-        self.assertTrue(any("Skipping credentials scan" in line for line in runner.lines))
+        self.assertTrue(any("katana: 0 JS files" in line for line in runner.lines))
+        self.assertFalse(any("skipping" in line.lower() for line in runner.lines))
 
 
 if __name__ == "__main__":

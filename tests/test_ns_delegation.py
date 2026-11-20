@@ -18,6 +18,7 @@ HARNESS = r'''
 set -o pipefail
 set +e
 SCRIPTPATH="$REPO_ROOT"
+source "$SCRIPTPATH/lib/common.sh"
 source "$SCRIPTPATH/modules/core.sh"
 source "$SCRIPTPATH/modules/subdomains.sh"
 
