@@ -1,6 +1,9 @@
 """Offline installer regressions. All installations are shell mocks in temp dirs."""
 import os
 from pathlib import Path
+import shlex
+import shutil
+import signal
 import subprocess
 import tempfile
 import unittest
@@ -17,15 +20,49 @@ class InstallerTests(unittest.TestCase):
         self.dest = self.root / "installed-massdns"
         self.calls = self.root / "calls"
         self.script = self.root / "install.sh"
-        # Redirect the absolute installation target and OS detection in fixture only.
+        # Defense in depth: NEVER inherit a host command search path. If a shell
+        # mock is skipped, executable stubs fail closed instead of running apt,
+        # Git, compilers, Python installers, scanners, or network utilities.
+        self.bin = self.root / "bin"
+        self.bin.mkdir()
+        for name in ("bash", "uname", "awk", "cut", "mktemp", "cat", "rm",
+                     "mkdir", "chmod", "tee", "touch", "sleep", "date", "cmp"):
+            target = shutil.which(name, path="/usr/bin:/bin")
+            self.assertIsNotNone(target, f"Required fixture utility: {name}")
+            (self.bin / name).symlink_to(target)
+        self.denied = ("apt", "apt-get", "apt-cache", "dpkg", "yum", "dnf",
+                       "pacman", "brew", "sudo", "git", "curl", "wget", "go",
+                       "uv", "pip", "pip3", "python", "python3", "make", "cmake",
+                       "gcc", "g++", "cc", "strip", "cp", "mv", "tar", "sh",
+                       "env", "crontab", "flock", "notify", "subfinder", "massdns",
+                       "dnsx", "puredns", "nuclei", "httpx", "katana", "dig",
+                       "nslookup", "getent", "timeout", "gtimeout")
+        for name in self.denied:
+            stub = self.bin / name
+            stub.write_text('#!/bin/bash\nprintf "DENIED %s\\n" "${0##*/}" >> "$CALLS"\n'
+                            'printf "DENIED %s\\n" "${0##*/}" >&2\nexit 97\n')
+            stub.chmod(0o755)
+        # Root detection must also be deterministic without using host sudo.
+        (self.bin / "id").write_text("#!/bin/bash\nprintf '0\\n'\n")
+        (self.bin / "id").chmod(0o755)
+        # Redirect absolute installation targets and OS detection in fixture only.
         text = SOURCE.read_text().replace("/usr/local/bin/massdns", str(self.dest))
+        text = text.replace("/usr/local/go", str(self.root / "unused-go"))
         text = text.replace("/etc/debian_version", str(self.root / "debian"))
+        # CLI script execution loads mocks explicitly, independent of Bash's
+        # SSH-specific startup rules. An unset variable tests the deny fallback.
+        text = text.replace("#!/bin/bash\n", '#!/bin/bash\n'
+                            'if [[ -n ${INSTALLER_TEST_MOCKS:-} ]]; then\n'
+                            '    source "$INSTALLER_TEST_MOCKS" || exit $?\nfi\n', 1)
         self.script.write_text(text)
         (self.root / "debian").touch()
         (self.root / "subenum.cfg").write_text(
             f'tools="{self.tools}"\nupgrade_tools=true\ninstall_golang=false\n'
         )
-        self.env = dict(os.environ, HOME=str(self.root), LOGFILE=str(self.root / "install.log"),
+        # Do not inherit exported Bash functions, startup files, SSH variables,
+        # credentials, Python/Go paths, or installer flags from the test runner.
+        self.env = dict(PATH=str(self.bin), HOME=str(self.root), TMPDIR=str(self.root),
+                        LANG="C", LC_ALL="C", LOGFILE=str(self.root / "install.log"),
                         CALLS=str(self.calls), FAIL="", VERBOSE="false", DRY_RUN="false",
                         TOOLS_ONLY="false", TEMPLATES_ONLY="false", REPAIR_DEPS="false")
         self.mock = self.root / "mocks.sh"
@@ -71,22 +108,111 @@ for forbidden in go git curl wget crontab notify subfinder yum pacman brew sudo;
 done
 ''')
         self.env["BASH_ENV"] = str(self.mock)
+        self.env["INSTALLER_TEST_MOCKS"] = str(self.mock)
         for repo in ("massdns", "regulator"):
             (self.tools / repo / ".git").mkdir(parents=True)
         (self.tools / "regulator" / "requirements.txt").write_text("datrie\neditdistance\n")
         (self.tools / "regulator" / "main.py").write_text("# fixture\n")
 
+    def run_process(self, args, env=None, timeout=10):
+        env = dict(self.env if env is None else env)
+        for name in tuple(env):
+            if name.startswith("SSH_") or name in ("BASH_EXECUTION_STRING", "ENV"):
+                del env[name]
+        proc = subprocess.Popen(args, cwd=self.root, env=env, text=True,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                start_new_session=True)
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired as exc:
+            # Kill the whole isolated session's process group, not just Bash:
+            # children may hold captured pipes open after their parent exits.
+            try:
+                os.killpg(proc.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            try:
+                stdout, stderr = proc.communicate(timeout=1)
+            except subprocess.TimeoutExpired:
+                stdout = stderr = ""
+            finally:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                # communicate reaps our child and closes all captured pipes.
+                remaining_out, remaining_err = proc.communicate()
+            exc.output = stdout or remaining_out
+            exc.stderr = stderr or remaining_err
+            raise
+        return subprocess.CompletedProcess(args, proc.returncode, stdout, stderr)
+
     def run_shell(self, command, fail=""):
         env = dict(self.env, FAIL=fail)
-        return subprocess.run(["bash", "-c", f'source "{self.script}"; {command}'],
-                              cwd=self.root, env=env, text=True, capture_output=True, timeout=10)
+        return self.run_process([str(self.bin / "bash"), "--noprofile", "--norc", "-c",
+                                 f'source {shlex.quote(str(self.mock))} || exit $?; '
+                                 f'source {shlex.quote(str(self.script))} || exit $?; {command}'], env)
 
     def cli(self, *args, fail=""):
-        return subprocess.run(["bash", str(self.script), *args], cwd=self.root,
-                              env=dict(self.env, FAIL=fail), text=True, capture_output=True, timeout=10)
+        return self.run_process([str(self.bin / "bash"), "--noprofile", "--norc",
+                                 str(self.script), *args], dict(self.env, FAIL=fail))
 
     def call_text(self):
         return self.calls.read_text() if self.calls.exists() else ""
+
+    def test_inherited_ssh_variables_do_not_disable_mocks(self):
+        self.env.update(SSH_CLIENT="192.0.2.1 12345 22",
+                        SSH_CONNECTION="192.0.2.1 12345 192.0.2.2 22",
+                        SSH_TTY="/dev/pts/999")
+        p = self.run_shell('[[ -z ${SSH_CLIENT+x} && -z ${SSH_CONNECTION+x} '
+                           '&& -z ${SSH_TTY+x} ]] || exit 98; install_system_packages',
+                           "apt-install")
+        self.assertEqual(p.returncode, 100, p.stdout + p.stderr)
+        self.assertIn("APT diagnostic install", p.stderr)
+        p = self.cli("--repair-deps")
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertNotIn("DENIED", self.call_text())
+
+    def test_missing_bash_env_still_loads_explicit_mocks(self):
+        self.env.pop("BASH_ENV")
+        p = self.run_shell("install_system_packages", "apt-update")
+        self.assertEqual(p.returncode, 100, p.stdout + p.stderr)
+        p = self.cli("--repair-deps")
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertNotIn("DENIED", self.call_text())
+
+    def test_missing_all_mocks_fails_closed_without_host_commands(self):
+        self.env.pop("BASH_ENV")
+        self.env.pop("INSTALLER_TEST_MOCKS")
+        p = self.cli("--repair-deps")
+        self.assertEqual(p.returncode, 97, p.stdout + p.stderr)
+        self.assertIn("DENIED apt-get", p.stdout + p.stderr)
+        self.assertNotIn("Dependency repair complete", p.stdout)
+        # Sourced function calls are equally safe even with no startup hook.
+        p = self.run_process([str(self.bin / "bash"), "--noprofile", "--norc", "-c",
+                              f'source {shlex.quote(str(self.script))}; install_system_packages'])
+        self.assertEqual(p.returncode, 97, p.stdout + p.stderr)
+        self.assertIn("DENIED apt-get", p.stderr)
+        # Exercise every executable deny fallback directly, never the host PATH.
+        for name in self.denied:
+            with self.subTest(command=name):
+                p = self.run_process([name, "--fixture-safety-check"])
+                self.assertEqual(p.returncode, 97, p.stdout + p.stderr)
+                self.assertIn(f"DENIED {name}", p.stderr)
+
+    def test_timeout_terminates_process_group_and_reaps_children(self):
+        pids = self.root / "timeout-pids"
+        command = ("sleep 30 & child=$!; "
+                   "trap 'wait \"$child\"; exit 143' TERM; "
+                   f'printf "%s %s\\n" "$$" "$child" > {shlex.quote(str(pids))}; '
+                   'wait "$child"')
+        with self.assertRaises(subprocess.TimeoutExpired):
+            self.run_process([str(self.bin / "bash"), "--noprofile", "--norc", "-c", command],
+                             timeout=0.5)
+        self.assertTrue(pids.exists(), "Timeout fixture failed to start")
+        for pid in map(int, pids.read_text().split()):
+            with self.assertRaises(ProcessLookupError, msg=f"Unreaped process {pid}"):
+                os.kill(pid, 0)
 
     def test_apt_update_failure_stops_before_install_and_uv(self):
         p = self.run_shell("install_system_packages", "apt-update")
