@@ -63,16 +63,11 @@ LOGFILE=${LOGFILE:-"./install.log"}
 DRY_RUN=${DRY_RUN:-false}
 TOOLS_ONLY=${TOOLS_ONLY:-false}
 TEMPLATES_ONLY=${TEMPLATES_ONLY:-false}
+REPAIR_DEPS=${REPAIR_DEPS:-false}
 
 # nuclei-templates checkout (used by script.sh full nuclei scan)
 NUCLEI_TEMPLATES_DIR=${NUCLEI_TEMPLATES_DIR:-/opt/nuclei-templates}
 NUCLEI_TEMPLATES_REPO=${NUCLEI_TEMPLATES_REPO:-https://github.com/projectdiscovery/nuclei-templates}
-
-# Log all output (default: install.log in repo root)
-if [[ -n ${LOGFILE} ]]; then
-    : >"${LOGFILE}"
-    exec > >(tee -a "${LOGFILE}") 2>&1
-fi
 
 q() {
     if [[ $DRY_RUN == "true" ]]; then
@@ -81,7 +76,19 @@ q() {
         printf "\n"
         return 0
     fi
-    if [[ $VERBOSE == "true" ]]; then "$@"; else { "$@"; } &>/dev/null; fi
+    local output rc
+    if [[ $VERBOSE == "true" ]]; then "$@"; return $?; fi
+    output=$(mktemp) || return 1
+    "$@" >"$output" 2>&1
+    rc=$?
+    if (( rc != 0 )); then
+        cat "$output" >&2
+        printf '[!] Command failed (exit %s): ' "$rc" >&2
+        printf '%q ' "$@" >&2
+        printf '\n' >&2
+    fi
+    rm -f "$output"
+    return "$rc"
 }
 
 q_to() {
@@ -94,9 +101,9 @@ q_to() {
         return 0
     fi
     if [[ -n $TIMEOUT_CMD ]]; then
-        if [[ $VERBOSE == "true" ]]; then "$TIMEOUT_CMD" "$secs" "$@"; else { "$TIMEOUT_CMD" "$secs" "$@"; } &>/dev/null; fi
+        q "$TIMEOUT_CMD" "$secs" "$@"
     else
-        if [[ $VERBOSE == "true" ]]; then "$@"; else { "$@"; } &>/dev/null; fi
+        q "$@"
     fi
 }
 
@@ -111,9 +118,6 @@ retry() {
         sleep $((delay * n))
     done
 }
-
-# Non-fatal error trap: log and continue
-trap 'rc=$?; ts=$(date +"%Y-%m-%d %H:%M:%S"); cmd=${BASH_COMMAND}; loc_ln=${BASH_LINENO[0]:-0}; msg="[$ts] install.sh ERR($rc) @ line ${loc_ln} :: ${cmd}"; if [[ -n "${LOGFILE:-}" ]]; then echo "$msg" >>"$LOGFILE"; else echo "$msg" >&2; fi' ERR
 
 # -------------------------------
 # Minimal UI helpers
@@ -142,7 +146,7 @@ with_spinner() {
     fi
     if [[ ! -t 1 ]]; then
         [[ -n $_msg ]] && printf "%s ... " "$_msg"
-        "$@" >/dev/null 2>&1
+        "$@"
         local exit_code=$?
         if [[ $exit_code -eq 0 ]]; then
             printf "done\n"
@@ -261,6 +265,7 @@ EOF
 clone_repo() {
     local gh_path="$1" dest="$2"
     [[ -z "$dest" || "$dest" == "/" ]] && return 1
+    [[ -e "$dest" || -L "$dest" ]] && { msg_err "[!] Refusing to replace existing path: $dest"; return 1; }
     local url="https://github.com/${gh_path}"
     local n=0 max=3 delay=3
     while true; do
@@ -295,12 +300,11 @@ function install_tools() {
             ((++go_ok))
             msg_ok "[$go_step/$total_go] ${gotool} installed"
         else
+            failed_tools+=("$gotool")
+            ((++go_fail))
             if command -v "$gotool" >/dev/null 2>&1; then
-                ((++go_skip))
                 msg_warn "[$go_step/$total_go] ${gotool} upgrade failed (existing binary kept)"
             else
-                failed_tools+=("$gotool")
-                ((++go_fail))
                 msg_err "[$go_step/$total_go] ${gotool} failed"
             fi
         fi
@@ -326,83 +330,8 @@ function install_tools() {
         fi
     done
 
-    header "Installing repositories (${#repos[@]})"
-
-    local repos_step=0
-    local failed_repos=()
-    local total_repo=${#repos[@]}
-    local repo_ok=0 repo_skip=0 repo_fail=0
-
-    for repo in "${!repos[@]}"; do
-        ((++repos_step))
-        if [[ $DRY_RUN == "true" ]]; then
-            printf "%s\n" "[DRY-RUN] clone/pull ${repo} from https://github.com/${repos[$repo]}"
-            continue
-        fi
-        if [[ $upgrade_tools == "false" ]]; then
-            if [[ -d "${dir}/${repo}" ]]; then
-                ((++repo_skip))
-                msg_warn "[$repos_step/$total_repo] $repo already present at ${dir}/${repo}"
-                continue
-            fi
-        fi
-        if [[ ! -d "${dir}/${repo}/.git" ]]; then
-            [[ -d "${dir}/${repo}" ]] && rm -rf "${dir}/${repo}"
-            msg_run "[$repos_step/${#repos[@]}] $repo (clone)"
-            clone_repo "${repos[$repo]}" "${dir}/${repo}"
-            exit_status=$?
-            if [[ $exit_status -ne 0 ]]; then
-                msg_err "[$repos_step/$total_repo] $repo clone failed"
-                failed_repos+=("$repo")
-                ((++repo_fail))
-                continue
-            fi
-            ((++repo_ok))
-        fi
-
-        cd "${dir}/${repo}" || {
-            msg_err "[$repos_step/$total_repo] $repo: cannot enter ${dir}/${repo}"
-            failed_repos+=("$repo")
-            ((++repo_fail))
-            continue
-        }
-
-        msg_run "[$repos_step/${#repos[@]}] $repo (pull)"
-        retry 3 3 q_to 60 git pull
-        exit_status=$?
-        if [[ $exit_status -ne 0 ]]; then
-            msg_err "[$repos_step/$total_repo] $repo pull failed"
-            failed_repos+=("$repo")
-            ((++repo_fail))
-            continue
-        fi
-
-        case "$repo" in
-            "massdns")
-                if ! q make; then
-                    msg_warn "[$repos_step/$total_repo] $repo: make failed"
-                else
-                    strip -s bin/massdns 2>/dev/null || true
-                    $SUDO cp bin/massdns /usr/local/bin/ &>/dev/null
-                fi
-                ;;
-            "regulator")
-                if [[ ! -d "venv" ]]; then
-                    uv venv venv &>/dev/null || true
-                fi
-                if [[ -s "requirements.txt" ]]; then
-                    uv pip install --upgrade -r requirements.txt --python venv/bin/python3 &>/dev/null || msg_warn "[$repos_step/$total_repo] $repo: pip requirements failed"
-                fi
-                ;;
-        esac
-
-        cd "$dir" || {
-            msg_err "Failed to navigate back to directory '$dir'"
-            exit 1
-        }
-
-        msg_ok "[$repos_step/$total_repo] $repo ready"
-    done
+    install_repositories
+    local repos_status=$?
 
     # Initialize tool configs on first run
     q command -v subfinder >/dev/null 2>&1 && q subfinder || true
@@ -417,18 +346,80 @@ function install_tools() {
     printf "  uv tools:  %b%d OK%b, %b%d failed%b (of %d)\n" \
         "$bgreen" "$px_ok" "$reset" \
         "$([[ $px_fail -gt 0 ]] && echo "$red" || echo "$bgreen")" "$px_fail" "$reset" "$total_px"
-    printf "  Repos:     %b%d OK%b, %d skipped, %b%d failed%b (of %d)\n" \
-        "$bgreen" "$repo_ok" "$reset" "$repo_skip" \
-        "$([[ $repo_fail -gt 0 ]] && echo "$red" || echo "$bgreen")" "$repo_fail" "$reset" "$total_repo"
 
-    local _total_fail=$(( go_fail + px_fail + repo_fail ))
+    local _total_fail=$(( go_fail + go_skip + px_fail + repos_status ))
     if [[ $_total_fail -gt 0 ]]; then
         printf "\n%bFailed items:%b\n" "$red" "$reset"
         [[ ${#failed_tools[@]} -gt 0 ]] && printf "  Go:    %s\n" "${failed_tools[*]}"
         [[ ${#failed_pipx_tools[@]} -gt 0 ]] && printf "  uv:    %s\n" "${failed_pipx_tools[*]}"
-        [[ ${#failed_repos[@]} -gt 0 ]] && printf "  Repos: %s\n" "${failed_repos[*]}"
         printf "\n%bRe-run install.sh to retry failed items.%b\n" "$yellow" "$reset"
+        return 1
     fi
+    return 0
+}
+
+# Build in a subshell: failures cannot leak a changed working directory.
+build_repository() (
+    local repo="$1"
+    cd "${dir}/${repo}" || return 1
+    case "$repo" in
+        massdns)
+            q make || return $?
+            [[ -x bin/massdns ]] || { msg_err "[!] massdns build produced no executable"; return 1; }
+            q $SUDO cp bin/massdns /usr/local/bin/massdns || return $?
+            [[ -x /usr/local/bin/massdns ]] || { msg_err "[!] Installed massdns is not executable"; return 1; }
+            q /usr/local/bin/massdns --help || return $?
+            ;;
+        regulator)
+            [[ -s requirements.txt && -f main.py ]] || { msg_err "[!] regulator source/requirements missing"; return 1; }
+            if [[ ! -x venv/bin/python3 ]]; then
+                # Match distro headers, not an automatically downloaded uv Python.
+                q uv venv --python python3 venv || return $?
+            fi
+            [[ -x venv/bin/python3 ]] || { msg_err "[!] regulator venv Python missing"; return 1; }
+            q uv pip install -r requirements.txt --python venv/bin/python3 || return $?
+            q uv pip check --python venv/bin/python3 || return $?
+            q venv/bin/python3 -c 'import datrie, editdistance, dns.resolver, tldextract; from dank.DankEncoder import DankEncoder; from dank.DankGenerator import DankGenerator' || return $?
+            ;;
+        *) msg_err "[!] Unknown repository: $repo"; return 1 ;;
+    esac
+)
+
+install_repositories() {
+    header "Installing repositories (${#repos[@]})"
+    local repo repo_ok=0 repo_skip=0 repo_fail=0
+    for repo in "${!repos[@]}"; do
+        if [[ $DRY_RUN == true ]]; then
+            msg_run "[DRY-RUN] build/validate $repo (repair=$REPAIR_DEPS)"
+            ((++repo_skip))
+            continue
+        fi
+        if [[ $REPAIR_DEPS == true ]]; then
+            if [[ ! -d "${dir}/${repo}/.git" ]]; then
+                msg_err "[!] $repo: repair requires existing clone at ${dir}/${repo}"
+                ((++repo_fail)); continue
+            fi
+        elif [[ -d "${dir}/${repo}" ]]; then
+            if [[ $upgrade_tools == false ]]; then
+                msg_warn "$repo already present (not validated)"
+                ((++repo_skip)); continue
+            fi
+            if [[ ! -d "${dir}/${repo}/.git" ]] || ! (cd "${dir}/${repo}" && retry 3 3 q_to 60 git pull --ff-only); then
+                msg_err "[!] $repo update failed; existing content preserved"
+                ((++repo_fail)); continue
+            fi
+        elif ! clone_repo "${repos[$repo]}" "${dir}/${repo}"; then
+            msg_err "[!] $repo clone failed"
+            ((++repo_fail)); continue
+        fi
+        if build_repository "$repo"; then
+            ((++repo_ok)); msg_ok "$repo ready"
+        else
+            ((++repo_fail)); msg_err "[!] $repo build/validation failed"
+        fi
+    done
+    printf '  Repos:     %d OK, %d skipped, %d failed (of %d)\n' "$repo_ok" "$repo_skip" "$repo_fail" "${#repos[@]}"
+    (( repo_fail == 0 ))
 }
 
 # Install/Update Golang
@@ -579,6 +570,7 @@ function install_golang_version() {
 
 # Install uv (needed for the uv-managed Python tools)
 function install_uv() {
+    export PATH="${HOME}/.local/bin:$PATH"
     if command -v uv &>/dev/null; then
         printf "%buv is already installed.%b\n" "$bgreen" "$reset"
         return 0
@@ -589,45 +581,50 @@ function install_uv() {
     fi
     printf "%bRunning: Installing uv%b\n" "$bblue" "$reset"
     local _tmpfile
-    _tmpfile=$(mktemp "${TMPDIR:-/tmp}/uv_install.XXXXXX")
+    _tmpfile=$(mktemp "${TMPDIR:-/tmp}/uv_install.XXXXXX") || return 1
     if curl -LsSf https://astral.sh/uv/install.sh -o "$_tmpfile" 2>/dev/null; then
-        sh "$_tmpfile" &>/dev/null
+        if ! q env UV_NO_MODIFY_PATH=1 sh "$_tmpfile"; then
+            rm -f "$_tmpfile"
+            return 1
+        fi
     else
-        msg_warn "[!] Failed to download uv installer"
+        msg_err "[!] Failed to download uv installer"
+        rm -f "$_tmpfile"
+        return 1
     fi
     rm -f "$_tmpfile"
-    # shellcheck source=/dev/null
-    source "${HOME}/.local/bin/env" 2>/dev/null || export PATH="${HOME}/.local/bin:$PATH"
-    uv tool update-shell &>/dev/null || true
+    command -v uv >/dev/null 2>&1 || { msg_err "[!] uv installation failed"; return 1; }
 }
 
 # System packages per OS (only what the subdomain toolchain needs)
 function install_system_packages() {
     if [[ -f /etc/debian_version ]]; then
-        $SUDO apt-get update -y &>/dev/null
-        $SUDO apt-get install -y python3 python3-venv build-essential gcc make cmake git curl libpcap-dev wget zip gzip pv dnsutils jq ca-certificates &>/dev/null
-        install_uv
+        q $SUDO apt-get update -y || return $?
+        q $SUDO apt-get install -y --no-remove python3 python3-venv python3-dev pkg-config build-essential gcc make cmake git curl libpcap-dev wget zip gzip pv dnsutils jq ca-certificates || return $?
+        install_uv || return $?
     elif [[ -f /etc/redhat-release ]]; then
-        $SUDO yum groupinstall "Development Tools" -y &>/dev/null
-        $SUDO yum install -y epel-release &>/dev/null || true
-        $SUDO yum install -y python3 gcc make cmake git curl libpcap wget zip gzip pv bind-utils jq ca-certificates &>/dev/null
-        install_uv
+        q $SUDO yum groupinstall "Development Tools" -y || return $?
+        q $SUDO yum install -y epel-release || return $?
+        q $SUDO yum install -y python3 python3-devel pkgconf-pkg-config gcc make cmake git curl libpcap wget zip gzip pv bind-utils jq ca-certificates || return $?
+        install_uv || return $?
     elif [[ -f /etc/arch-release ]]; then
-        $SUDO pacman -Sy --noconfirm python base-devel gcc make cmake git curl libpcap wget zip gzip pv bind jq ca-certificates &>/dev/null
-        install_uv
+        q $SUDO pacman -Sy --noconfirm python pkgconf base-devel gcc make cmake git curl libpcap wget zip gzip pv bind jq ca-certificates || return $?
+        install_uv || return $?
     elif [[ $IS_MAC == "True" ]]; then
         if ! command -v brew &>/dev/null; then
-            /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+            /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" || return $?
         fi
-        brew update &>/dev/null
-        brew install --formula bash coreutils gnu-getopt gnu-sed python uv massdns jq gcc cmake git curl wget zip pv bind &>/dev/null
-        uv tool update-shell &>/dev/null || true
+        q brew update || return $?
+        q brew install --formula bash coreutils gnu-getopt gnu-sed python pkg-config uv massdns jq gcc cmake git curl wget zip pv bind || return $?
+        if [[ $REPAIR_DEPS != true ]]; then
+            q uv tool update-shell || return $?
+        fi
     elif [[ -f /etc/os-release ]]; then
-        $SUDO yum install -y python3 gcc make cmake git curl libpcap wget zip gzip pv bind-utils jq ca-certificates &>/dev/null
-        install_uv
+        q $SUDO yum install -y python3 python3-devel pkgconf-pkg-config gcc make cmake git curl libpcap wget zip gzip pv bind-utils jq ca-certificates || return $?
+        install_uv || return $?
     else
         printf "%b[!] Unsupported OS. Please install dependencies manually.%b\n" "$bred" "$reset"
-        exit 1
+        return 1
     fi
 }
 
@@ -722,45 +719,54 @@ function setup_nuclei_templates() {
 }
 
 function initial_setup() {
+    export PATH="${HOME}/.local/bin:$PATH"
     banner
 
+    if [[ $REPAIR_DEPS == true ]]; then
+        header "Dependency repair (existing clones only)"
+        with_spinner "Installing system dependencies" install_system_packages || return $?
+        install_repositories || return $?
+        msg_ok "Dependency repair complete."
+        return 0
+    fi
+
     if [[ $TEMPLATES_ONLY == "true" ]]; then
-        setup_nuclei_templates
+        setup_nuclei_templates || return $?
         return
     fi
 
     if [[ $TOOLS_ONLY == "true" ]]; then
         header "Tools-only mode"
-        with_spinner "Installing/validating Golang" install_golang_version
+        with_spinner "Installing/validating Golang" install_golang_version || return $?
         export GOROOT=/usr/local/go
         export GOPATH="${HOME}/go"
         export PATH="$GOPATH/bin:$GOROOT/bin:$HOME/.local/bin:$PATH"
-        mkdir -p "$dir"
-        install_uv
-        q uv tool update-shell
+        mkdir -p "$dir" || return $?
+        install_uv || return $?
+        q uv tool update-shell || return $?
         export PATH="${HOME}/.local/bin:${PATH}"
-        install_tools
-        setup_nuclei_templates
+        install_tools || return $?
+        setup_nuclei_templates || return $?
         return
     fi
 
     header "Install/Update"
-    with_spinner "Installing system packages" install_system_packages
+    with_spinner "Installing system packages" install_system_packages || return $?
     if [[ $DRY_RUN != "true" ]]; then
         check_network
     fi
-    with_spinner "Installing/validating Golang" install_golang_version
+    with_spinner "Installing/validating Golang" install_golang_version || return $?
     export GOROOT=/usr/local/go
     export GOPATH="${HOME}/go"
     export PATH="$GOPATH/bin:$GOROOT/bin:$HOME/.local/bin:$PATH"
 
-    mkdir -p "$dir"
-    q uv tool update-shell
+    mkdir -p "$dir" || return $?
+    q uv tool update-shell || return $?
     export PATH="${HOME}/.local/bin:${PATH}"
 
-    install_tools
-    download_required_files
-    setup_nuclei_templates
+    install_tools || return $?
+    download_required_files || return $?
+    setup_nuclei_templates || return $?
 
     # Strip all Go binaries and copy to /usr/local/bin (files only)
     find "${GOPATH}/bin" -type f -perm -u+x -exec strip -s {} \; 2>/dev/null || true
@@ -777,6 +783,7 @@ Usage: $0 [OPTIONS]
 
 Options:
   -h, --help          Show this help and exit
+  --repair-deps       Repair OS dependencies + existing massdns/regulator only
   --tools             Only install/upgrade tools and exit
   --templates         Only setup /opt/nuclei-templates + nightly pull cron and exit
   --verbose           Show detailed installer output
@@ -804,6 +811,10 @@ function handle_install_arguments() {
             -h | --help)
                 show_additional_help
                 ;;
+            --repair-deps)
+                REPAIR_DEPS=true
+                shift
+                ;;
             --tools)
                 TOOLS_ONLY=true
                 shift
@@ -817,6 +828,7 @@ function handle_install_arguments() {
                 shift
                 ;;
             --log)
+                [[ $# -ge 2 && -n $2 && $2 != --* ]] || { msg_err "--log requires a file"; return 1; }
                 LOGFILE="$2"
                 shift 2 || true
                 ;;
@@ -832,6 +844,16 @@ function handle_install_arguments() {
         esac
     done
 
+    local modes=0
+    [[ $TOOLS_ONLY == true ]] && ((++modes))
+    [[ $TEMPLATES_ONLY == true ]] && ((++modes))
+    [[ $REPAIR_DEPS == true ]] && ((++modes))
+    (( modes <= 1 )) || { msg_err "Choose only one installer mode"; return 1; }
+    if [[ -n $LOGFILE && $DRY_RUN != true ]]; then
+        touch "$LOGFILE" || return 1
+        exec > >(tee -a "$LOGFILE") 2>&1
+    fi
+
     printf "%bThis may take some time. Grab a coffee!%b\n" "$yellow" "$reset"
 
     if [[ "$(id -u)" -eq 0 ]]; then
@@ -845,5 +867,8 @@ function handle_install_arguments() {
     fi
 }
 
-handle_install_arguments "$@"
-initial_setup
+if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
+    handle_install_arguments "$@" || exit $?
+    initial_setup
+    exit $?
+fi
