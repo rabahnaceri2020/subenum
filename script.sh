@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # subenum pipeline: enumerate subdomains, diff new ones, then httpx -> katana -> nuclei.
-# Usage: script.sh [-l <domain-list-file>]
+# Usage: script.sh [--deep] [-l <domain-list-file>]
 # Progress and results stream live: HTTPX hosts, Katana URLs, and Nuclei findings.
 # Results are also saved under data/; subenum output is streamed and logged.
 
@@ -10,8 +10,11 @@ SUBENUM_SCRIPT="$BASE/subenum.sh"
 RECON_DIR="$BASE/Recon"
 OUT_DIR="$BASE/data"
 
-# subenum flags, e.g. "--deep" or "--only sub_passive,sub_crt"
+# Additional subenum flags, e.g. "--only sub_passive,sub_crt".
+# The wrapper's --deep option overrides method selection with all methods.
 SUBENUM_OPTS=""
+SUBENUM_CLI_OPTS=()
+DEEP_MODE=false
 
 # heartbeat while a step runs (seconds); override with HEARTBEAT_INTERVAL=10
 HEARTBEAT_INTERVAL="${HEARTBEAT_INTERVAL:-30}"
@@ -59,14 +62,33 @@ wait_with_heartbeat() {
             next=$(( $(date +%s) + HEARTBEAT_INTERVAL ))
         fi
     done
-    wait "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null
 }
 
-# -l <file>: use a specific domain list (default: $BASE/domains.txt)
+show_help() {
+    printf 'Usage: bash %s [--deep] [-l <domain-list-file>]\n\n' "$0"
+    printf '%s\n' \
+        '  --deep       Enable every enumeration method, deep budgets, and the huge wordlist.' \
+        '  -l <file>    Use a domain list (default: domains.txt beside this script).' \
+        '  -h, --help   Show this help without running tools.' \
+        '' \
+        'Without --deep, the existing fast enumeration profile is unchanged.' \
+        'Deep runs require the big wordlist and all enumeration dependencies; they can take hours.'
+}
+
+# Parse options before creating output files or running any tools.
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --deep)
+            DEEP_MODE=true
+            shift
+            ;;
+        -h|--help)
+            show_help
+            exit 0
+            ;;
         -l)
-            if [[ -z "${2:-}" ]]; then
+            if [[ -z "${2:-}" || "$2" == -* ]]; then
                 echo "ERROR: -l requires a file argument" >&2
                 exit 1
             fi
@@ -74,11 +96,15 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         *)
-            echo "ERROR: unknown argument: $1 (usage: $0 [-l <domain-list-file>])" >&2
+            echo "ERROR: unknown argument: $1 (usage: $0 [--deep] [-l <domain-list-file>])" >&2
             exit 1
             ;;
     esac
 done
+
+if [[ "$DEEP_MODE" == true ]]; then
+    SUBENUM_CLI_OPTS=(--deep --only all --check-tools)
+fi
 
 mkdir -p "$OUT_DIR" || { echo "ERROR: Cannot create output directory: $OUT_DIR" >&2; exit 1; }
 if [[ ! -f "$DOMAIN_LIST" ]]; then
@@ -87,6 +113,9 @@ if [[ ! -f "$DOMAIN_LIST" ]]; then
 fi
 
 log "Target list: $DOMAIN_LIST"
+if [[ "$DEEP_MODE" == true ]]; then
+    log "Deep enumeration: all methods, huge wordlist, extended budgets (may take hours)"
+fi
 
 # Make sure the brute wordlist exists (the vendored .gz is expanded on first run)
 WORDLIST_FILE="$BASE/resources/wordlists/subdomains.txt"
@@ -95,6 +124,7 @@ if [[ ! -s "$WORDLIST_FILE" && -s "${WORDLIST_FILE}.gz" ]]; then
     gzip -dc "${WORDLIST_FILE}.gz" > "$WORDLIST_FILE"
 fi
 
+pipeline_status=0
 for domain in $(cat "$DOMAIN_LIST"); do
     log "Working on $domain"
 
@@ -117,8 +147,16 @@ for domain in $(cat "$DOMAIN_LIST"); do
         echo "$(date '+%Y-%m-%d %H:%M:%S') - Starting subenum for $domain"
         echo "========================================"
     } >> "$LOG_FILE"
-    ( bash "$SUBENUM_SCRIPT" -d "$domain" $SUBENUM_OPTS 2>&1 | tee -a "$LOG_FILE" ) &
-    wait_with_heartbeat $! "subenum" "$start_time"
+    ( set -o pipefail; bash "$SUBENUM_SCRIPT" -d "$domain" $SUBENUM_OPTS "${SUBENUM_CLI_OPTS[@]}" 2>&1 | tee -a "$LOG_FILE" ) &
+    if wait_with_heartbeat $! "subenum" "$start_time"; then
+        :
+    else
+        enum_status=$?
+        log "ERROR: subenum failed for $domain (exit ${enum_status}); downstream stages not started"
+        printf '%s - Failed with exit %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$enum_status" >> "$LOG_FILE"
+        pipeline_status=1
+        continue
+    fi
     elapsed=$(($(date +%s) - start_time))
     echo "$(date '+%Y-%m-%d %H:%M:%S') - Completed in ${elapsed}s" >> "$LOG_FILE"
     log "subenum finished in ${elapsed}s"
@@ -213,3 +251,5 @@ if [[ "$GIT_PULL_AFTER_RUN" == "true" ]]; then
         log "Skipping git pull ($BASE is not a git repository)"
     fi
 fi
+
+exit "$pipeline_status"

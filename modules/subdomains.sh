@@ -943,8 +943,12 @@ function sub_brute() {
             end_subfunc "Failed to reset brute candidate files" "${FUNCNAME[0]}" "FAIL"
             return 1
         fi
-        if [[ ! -s "$wordlist" ]]; then
-            _print_msg WARN "Brute wordlist missing or empty: $wordlist (run ./install.sh --tools to fetch it)"
+        if [[ ! -s "$wordlist" || ! -r "$wordlist" ]]; then
+            _print_msg WARN "Brute wordlist missing, empty, or unreadable: $wordlist"
+            if [[ "${DEEP:-false}" == true ]]; then
+                end_subfunc "Deep brute force requires the configured big wordlist" "${FUNCNAME[0]}" "FAIL"
+                return 1
+            fi
             end_subfunc "0 new subs (bruteforce - missing wordlist)" "${FUNCNAME[0]}" "SKIP_NOINPUT"
             return 0
         fi
@@ -1464,14 +1468,20 @@ function sub_recursive_brute() {
         start_subfunc "${FUNCNAME[0]}" "Running: Subdomains recursive search active"
 
         subdomain_count=$(wc -l <subdomains/subdomains.txt)
-        if [[ $subdomain_count -le $DEEP_LIMIT ]]; then
+        if [[ "${DEEP:-false}" == true ]] || [[ $subdomain_count -le $DEEP_LIMIT ]]; then
+            local wordlist="$subs_wordlist"
+            [[ "${DEEP:-false}" == true ]] && wordlist="$subs_wordlist_big"
+            if [[ ! -s "$wordlist" || ! -r "$wordlist" ]]; then
+                end_subfunc "Recursive brute-force wordlist missing or unreadable: ${wordlist}" "${FUNCNAME[0]}" "FAIL"
+                return 1
+            fi
             if [[ ! -s ".tmp/subdomains_recurs_top.txt" ]]; then
                 run_command dsieve -if subdomains/subdomains.txt -f 3 -top "$DEEP_RECURSIVE_PASSIVE" >.tmp/subdomains_recurs_top.txt
             fi
 
             for subdomain_top in $(cat .tmp/subdomains_recurs_top.txt); do
                 : > .tmp/brute_recursive_result_part.txt
-                _bruteforce_domains "$subs_wordlist" "$subdomain_top" .tmp/brute_recursive_result_part.txt
+                _bruteforce_domains "$wordlist" "$subdomain_top" .tmp/brute_recursive_result_part.txt
                 if [[ -s .tmp/brute_recursive_result_part.txt ]]; then
                     cat .tmp/brute_recursive_result_part.txt | anew -q .tmp/brute_recursive.txt
                 fi

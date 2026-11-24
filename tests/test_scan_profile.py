@@ -38,14 +38,26 @@ class ScanProfileTests(unittest.TestCase):
         self.args = self.work / "args.bin"
         self.trusted = self.work / "trusted.txt"
         self.trusted.write_text("127.0.0.1\n")
+        self.bin = self.work / 'bin'
+        self.bin.mkdir()
+        for name in ('bash', 'cat', 'cp', 'date', 'dirname', 'mkdir', 'rm', 'sort', 'tee',
+                     'wc', 'awk', 'grep', 'sed', 'tr', 'cut', 'touch', 'head', 'tail',
+                     'basename', 'find', 'xargs', 'chmod', 'sleep', 'timeout', 'python3', 'uname',
+                     'getopt', 'mktemp', 'mv', 'realpath', 'readlink'):
+            executable = shutil.which(name)
+            if executable:
+                (self.bin / name).symlink_to(executable)
         self.env = dict(
-            os.environ, REPO_ROOT=str(ROOT), HOME=str(self.work),
+            os.environ, PATH=str(self.bin), REPO_ROOT=str(ROOT), HOME=str(self.work),
             GOPATH=str(self.work / "go"), GOROOT=str(self.work / "goroot"),
             PROFILE_CAPTURE=str(self.capture), ARG_CAPTURE=str(self.args),
             LOGFILE=str(self.work / "run.log"), TEST_NAT="no",
             TRUSTED=str(self.trusted), DRY_RUN="false",
             DNS_RESOLVER_SELECTED="", RECON_BEHIND_NAT="",
         )
+
+        for name in ('BASH_ENV', 'ENV', 'CDPATH', 'PYTHONPATH', 'PYTHONHOME'):
+            self.env.pop(name, None)
 
     def run_shell(self, script, **env):
         result = subprocess.run(
@@ -145,8 +157,7 @@ printf 'www\n' >words.txt
 
     @unittest.skipUnless(shutil.which("timeout"), "GNU timeout required")
     def test_dns_budget_stops_a_slow_tool(self):
-        binary = self.work / "bin"
-        binary.mkdir()
+        binary = self.bin
         dnsx = binary / "dnsx"
         dnsx.write_text('#!/usr/bin/env python3\nimport time\ntime.sleep(30)\n')
         dnsx.chmod(0o755)
@@ -159,9 +170,44 @@ printf 'previous.example.test\n' >output.txt
 _resolve_domains input.txt output.txt
 status=$?
 [[ "$status" == 124 ]] || exit 91
-''', PATH=str(binary) + os.pathsep + os.environ.get('PATH', ''),
+''', PATH=str(binary),
                        TEST_TIMEOUT_CMD=shutil.which('timeout'))
         self.assertEqual((self.work / 'output.txt').read_text(), 'previous.example.test\n')
+
+    def test_cli_all_enables_every_flag_and_allows_unmapped_methods(self):
+        flags = ['SUBDOMAINS_GENERAL', 'SUBPASSIVE', 'SUBCRT', 'SUBNOERROR', 'SRV_ENUM',
+                 'SUBBRUTE', 'SUBPERMUTE', 'SUBREGEXPERMUTE', 'SUBIAPERMUTE',
+                 'SUB_RECURSIVE_PASSIVE', 'SUB_RECURSIVE_BRUTE', 'NS_DELEGATION']
+        methods = ['sub_passive', 'sub_crt', 'sub_noerror', 'sub_srv', 'sub_brute',
+                   'sub_permut', 'sub_regex_permut', 'sub_ia_permut',
+                   'sub_recursive_passive', 'sub_recursive_brute', 'sub_ns_delegation',
+                   'sub_active', 'sub_tls', 'sub_dns']
+        config = self.work / 'disabled.cfg'
+        config.write_text('source "$REPO_ROOT/subenum.cfg"\n' +
+                          '\n'.join(flag + '=false' for flag in flags) + r'''
+check_critical_dependencies() { :; }
+tools_installed() { :; }
+init_dns_resolver() { :; }
+notification() { :; }
+subdomains_full() {
+    : > "$PROFILE_CAPTURE"
+''' + '\n'.join('printf "%s\\n" "$' + flag + '" >> "$PROFILE_CAPTURE"' for flag in flags) +
+                          '\n' + '\n'.join('if _method_selected ' + method + '; then printf "yes\\n"; else printf "no\\n"; fi >> "$PROFILE_CAPTURE"' for method in methods) + '\n}\n')
+        cases = [([], ['false'] * len(flags), ['yes'] * len(methods)),
+                 (['--deep'], ['false'] * len(flags), ['yes'] * len(methods)),
+                 (['--deep', '--only', 'all'], ['true'] * len(flags), ['yes'] * len(methods)),
+                 (['--only', 'all'], ['true'] * len(flags), ['yes'] * len(methods)),
+                 (['--deep', '--only', 'sub_brute'],
+                  ['true' if flag == 'SUBBRUTE' else 'false' for flag in flags],
+                  ['yes' if method == 'sub_brute' else 'no' for method in methods])]
+        for options, enabled, selected in cases:
+            with self.subTest(options=options):
+                result = subprocess.run(
+                    ['bash', str(ROOT / 'subenum.sh'), '-d', 'example.test', '-f', str(config),
+                     '-o', str(self.work / 'output'), '--dry-run', '--no-banner', '--quiet', *options],
+                    cwd=self.work, env=self.env, text=True, capture_output=True, timeout=10)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(self.capture.read_text().splitlines(), enabled + selected)
 
     def test_cli_applies_profile_after_config_and_cli_overrides(self):
         config = self.work / "offline.cfg"

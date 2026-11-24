@@ -150,8 +150,17 @@ class FastStageTests(unittest.TestCase):
         self.wordlist_used = self.work / "wordlist-used.txt"
         self.raw = self.work / ".tmp/subs_brute.txt"
         self.valid = self.work / ".tmp/subs_brute_valid.txt"
+        binary = self.work / 'bin'
+        binary.mkdir()
+        for name in ('bash', 'cat', 'cp', 'date', 'dirname', 'mkdir', 'rm', 'sort', 'tee',
+                     'wc', 'awk', 'grep', 'sed', 'tr', 'cut', 'touch', 'head', 'tail',
+                     'basename', 'find', 'xargs', 'chmod', 'sleep', 'timeout', 'python3'):
+            executable = shutil.which(name)
+            if executable:
+                (binary / name).symlink_to(executable)
         self.env = dict(
             os.environ,
+            PATH=str(binary),
             REPO_ROOT=str(ROOT),
             TEST_EVENTS=str(self.events),
             WORDLIST_USED=str(self.wordlist_used),
@@ -196,6 +205,9 @@ class FastStageTests(unittest.TestCase):
             SCOPE_EXIT="0",
             SCOPE_FIXTURE="api.example.test\n",
         )
+
+        for name in ('BASH_ENV', 'ENV', 'CDPATH', 'PYTHONPATH', 'PYTHONHOME'):
+            self.env.pop(name, None)
 
     def run_stage(self, method, extra="", **settings):
         return subprocess.run(
@@ -283,6 +295,43 @@ class FastStageTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(self.wordlist_used.read_text().strip(), str(self.big_words))
         self.assertEqual(self.event_lines(), ["brute"])
+
+    def test_deep_brute_missing_big_list_fails_without_small_list_fallback(self):
+        self.big_words.unlink()
+        result = self.run_stage('sub_brute', DEEP='true')
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.event_lines(), [])
+        self.assertEqual(self.input.read_text(), 'seed.example.test\n')
+        self.assertFalse(self.checkpoint('sub_brute').exists())
+
+    def run_recursive(self, **settings):
+        (self.work / '.tmp/subdomains_recurs_top.txt').write_text('seed.example.test\n')
+        return self.run_stage('sub_recursive_brute', SUB_RECURSIVE_BRUTE='true', **settings)
+
+    def test_normal_recursive_brute_uses_small_wordlist(self):
+        result = self.run_recursive()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.wordlist_used.read_text().strip(), str(self.words))
+        self.assertIn('brute', self.event_lines())
+
+    def test_normal_recursive_brute_keeps_count_limit(self):
+        result = self.run_recursive(DEEP_LIMIT='0')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.event_lines(), [])
+
+    def test_deep_recursive_brute_uses_big_list_and_bypasses_count_limit(self):
+        result = self.run_recursive(DEEP='true', DEEP_LIMIT='0')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.wordlist_used.read_text().strip(), str(self.big_words))
+        self.assertIn('brute', self.event_lines())
+
+    def test_deep_recursive_missing_big_list_fails_without_fallback(self):
+        self.big_words.unlink()
+        result = self.run_recursive(DEEP='true', DEEP_LIMIT='0')
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.event_lines(), [])
+        self.assertEqual(self.input.read_text(), 'seed.example.test\n')
+        self.assertFalse(self.checkpoint('sub_recursive_brute').exists())
 
     def test_empty_brute_result_clears_stale_candidates(self):
         self.raw.write_text("stale-raw.example.test\n")

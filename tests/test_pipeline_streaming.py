@@ -89,10 +89,13 @@ try:
     elif role == "subenum":
         domain = args[args.index("-d") + 1]
         destination = root / "Recon" / domain / "subdomains" / "subdomains.txt"
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_text("\n".join(config["subdomains"]) + "\n")
         record(domain=domain)
+        if not config.get("subenum_exit"):
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_text("\n".join(config["subdomains"]) + "\n")
         produce("subenum", [config["subenum_line"]])
+        if config.get("subenum_exit"):
+            os._exit(config["subenum_exit"])
     elif role == "anew":
         incoming = sys.stdin.read().splitlines()
         destination = Path(args[0])
@@ -145,8 +148,9 @@ except BaseException as error:
 class RunningPipeline:
     """Read wrapper stdout continuously; release each producer only on demand."""
 
-    def __init__(self, work, env, gated):
+    def __init__(self, work, env, gated, args=()):
         self.work, self.env, self.gated = work, env, gated
+        self.args = args
         self.process = None
         self.reader = None
         self.lines = []
@@ -165,7 +169,7 @@ class RunningPipeline:
         env = dict(self.env, MOCK_GATES=json.dumps(gates))
         try:
             self.process = subprocess.Popen(
-                [CORE["bash"], str(self.work / "script.sh")], cwd=self.work,
+                [CORE["bash"], str(self.work / "script.sh"), *self.args], cwd=self.work,
                 env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT, text=True, bufsize=1,
                 start_new_session=True, pass_fds=tuple(self.readers),
@@ -280,9 +284,9 @@ class PipelineStreamingTests(unittest.TestCase):
         for variable in ("BASH_ENV", "ENV", "CDPATH", "PYTHONPATH", "PYTHONHOME"):
             self.env.pop(variable, None)
 
-    def start(self, gated=False):
+    def start(self, gated=False, args=()):
         (self.work / "fixture.json").write_text(json.dumps(self.config))
-        runner = RunningPipeline(self.work, self.env, gated)
+        runner = RunningPipeline(self.work, self.env, gated, args)
         self.addCleanup(runner.close)
         runner.start()
         return runner
@@ -356,6 +360,69 @@ class PipelineStreamingTests(unittest.TestCase):
         self.assertEqual([record["tool"] for record in self.records()], ["subenum", "anew", "git", "git"])
         for suffix in (".httpx", ".jsurls", ".tokens", ".nuclei"):
             self.assertFalse((self.data / (DOMAIN + suffix)).exists())
+
+    def test_deep_appends_all_methods_and_tool_check_as_separate_arguments(self):
+        runner = self.start(args=['--deep'])
+        self.assert_finished(runner)
+        calls = [r for r in self.records() if r['tool'] == 'subenum']
+        self.assertEqual(calls[0]['args'], ['-d', DOMAIN, '--deep', '--only', 'all', '--check-tools'])
+
+    def test_legacy_subenum_options_remain_before_quoted_cli_arguments(self):
+        wrapper = self.work / 'script.sh'
+        source = wrapper.read_text()
+        self.assertEqual(source.count('SUBENUM_OPTS=""'), 1)
+        wrapper.write_text(source.replace('SUBENUM_OPTS=""', 'SUBENUM_OPTS="--quiet -q 77"'))
+        runner = self.start(args=['--deep'])
+        self.assert_finished(runner)
+        calls = [r for r in self.records() if r['tool'] == 'subenum']
+        self.assertEqual(calls[0]['args'], ['-d', DOMAIN, '--quiet', '-q', '77',
+                                          '--deep', '--only', 'all', '--check-tools'])
+
+    def test_list_path_with_spaces_works_before_or_after_deep(self):
+        listing = self.work / 'custom targets with spaces.txt'
+        listing.write_text(DOMAIN + '\n')
+        for args in (['-l', str(listing), '--deep'], ['--deep', '-l', str(listing)]):
+            with self.subTest(args=args):
+                runner = self.start(args=args)
+                self.assertEqual(runner.finish(), 0, '\n'.join(runner.lines))
+                calls = [r for r in self.records() if r['tool'] == 'subenum']
+                self.assertEqual(calls[-1]['args'], ['-d', DOMAIN, '--deep', '--only', 'all', '--check-tools'])
+        if (self.events / 'calls.jsonl').exists():
+            self.assertEqual(len([r for r in self.records() if r['tool'] == 'subenum']), 2)
+
+    def test_help_is_side_effect_free(self):
+        for option in ('--help', '-h'):
+            with self.subTest(option=option):
+                before = {p.relative_to(self.work) for p in self.work.rglob('*')}
+                runner = self.start(args=[option])
+                self.assertEqual(runner.finish(), 0, '\n'.join(runner.lines))
+                after = {p.relative_to(self.work) for p in self.work.rglob('*')}
+                self.assertEqual(after - before, {Path('fixture.json')} if Path('fixture.json') not in before else set())
+                self.assertFalse((self.events / 'calls.jsonl').exists())
+                self.assertTrue(any('--deep' in line for line in runner.lines))
+
+    def test_invalid_arguments_rejected_before_scanners_or_git(self):
+        for args in (['--unknown'], ['-l'], ['--deep', '--unknown'], ['unexpected-target']):
+            with self.subTest(args=args):
+                runner = self.start(args=args)
+                self.assertNotEqual(runner.finish(), 0, '\n'.join(runner.lines))
+                self.assertFalse((self.events / 'calls.jsonl').exists())
+                self.assertFalse((self.work / 'logs/recon.log').exists())
+                self.assertEqual(list(self.data.iterdir()), [])
+
+    def test_failed_subenum_blocks_downstream_even_with_old_recon_output(self):
+        destination = self.work / 'Recon' / DOMAIN / 'subdomains/subdomains.txt'
+        destination.parent.mkdir(parents=True)
+        destination.write_text('stale.example.test\n')
+        self.config['subenum_exit'] = 37
+        runner = self.start(args=['--deep'])
+        self.assertNotEqual(runner.finish(), 0, '\n'.join(runner.lines))
+        self.assertEqual(destination.read_text(), 'stale.example.test\n')
+        self.assertTrue((self.events / 'calls.jsonl').exists(), '\n'.join(runner.lines))
+        self.assertEqual([r['args'] for r in self.records() if r['tool'] == 'subenum'],
+                         [['-d', DOMAIN, '--deep', '--only', 'all', '--check-tools']])
+        self.assertFalse(any(r['tool'] in ('anew', 'httpx', 'katana', 'nuclei', 'notify') for r in self.records()))
+        self.assertEqual(list(self.data.iterdir()), [])
 
     def test_empty_httpx_skips_katana_and_both_nuclei_scans(self):
         self.config["httpx"] = []

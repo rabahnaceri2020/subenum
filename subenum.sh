@@ -80,7 +80,7 @@ function help() {
     printf " %bENUMERATION OPTIONS%b\n" "${bblue:-}" "${reset:-}"
     printf "   Default: fast scan (short wordlist, dnsx, bounded DNS/TLS stages)\n"
     printf "   --deep                      Thorough scan (permutations, DNS recon, NS/AXFR, larger wordlist)\n"
-    printf "   --only <m1,m2,...>          Run only the given methods (see METHODS below)\n"
+    printf "   --only <m1,m2,...|all>      Select methods; all enables every method switch\n"
     printf "   --no-parallel               Force sequential execution\n"
     printf "   --parallel                  Run independent phases in parallel (default)\n"
     printf "   --force                     Re-run all methods (ignore cached markers)\n"
@@ -115,6 +115,7 @@ function help() {
     printf " %bEXAMPLES%b\n" "${bblue:-}" "${reset:-}"
     printf "   %s -d example.com\n" "$0"
     printf "   %s -d example.com --deep\n" "$0"
+    printf "   %s -d example.com --deep --only all\n" "$0"
     printf "   %s -l targets.txt -o /tmp/recon\n" "$0"
     printf "   %s -d example.com --only sub_passive,sub_crt,sub_brute\n\n" "$0"
 }
@@ -425,6 +426,15 @@ apply_only_selection() {
         [sub_ns_delegation]=NS_DELEGATION
     )
     local flag m
+    # Explicit all-method selection also enables methods disabled in the config.
+    # Keep plain --deep behavior unchanged: it still respects those switches.
+    if [[ "$ONLY_METHODS" == all ]]; then
+        SUBDOMAINS_GENERAL=true
+        for flag in "${!only_map[@]}"; do
+            printf -v "${only_map[$flag]}" '%s' true
+        done
+        return 0
+    fi
     for flag in "${!only_map[@]}"; do
         printf -v "${only_map[$flag]}" '%s' false
     done
@@ -444,7 +454,7 @@ apply_only_selection
 
 # Returns 0 when a method is allowed to run under --only selection.
 _method_selected() {
-    [[ -z "$ONLY_METHODS" ]] && return 0
+    [[ -z "$ONLY_METHODS" || "$ONLY_METHODS" == all ]] && return 0
     [[ ",${ONLY_METHODS}," == *",$1,"* ]]
 }
 
