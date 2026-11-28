@@ -80,11 +80,32 @@ run_command() {
         return 99
     fi
 }
-_run_timed_command() { shift; "$@"; }
+_run_timed_command() {
+    printf '%s\n' "$1" > "$TIMEOUT_USED"
+    shift
+    "$@"
+}
 dnsx() {
     printf 'dnsx\n' >> "$TEST_EVENTS"
-    while IFS= read -r host; do :; done
+    local has_wordlist=false
+    while (($#)); do
+        if [[ "$1" == "-w" ]]; then
+            has_wordlist=true
+            printf '%s\n' "$2" > "$DNSX_WORDLIST_USED"
+            shift 2
+        else
+            shift
+        fi
+    done
+    if [[ ! -t 0 ]]; then
+        while IFS= read -r host; do :; done
+    fi
+    if [[ "$has_wordlist" == true ]]; then
+        printf '%s' "$NOERROR_FIXTURE"
+        return "${NOERROR_EXIT:-0}"
+    fi
     printf '%s' "$DNSX_FIXTURE"
+    return "${DNSX_EXIT:-0}"
 }
 tlsx() {
     printf 'tlsx\n' >> "$TEST_EVENTS"
@@ -154,7 +175,8 @@ class FastStageTests(unittest.TestCase):
         binary.mkdir()
         for name in ('bash', 'cat', 'cp', 'date', 'dirname', 'mkdir', 'rm', 'sort', 'tee',
                      'wc', 'awk', 'grep', 'sed', 'tr', 'cut', 'touch', 'head', 'tail',
-                     'basename', 'find', 'xargs', 'chmod', 'sleep', 'timeout', 'python3'):
+                     'basename', 'find', 'xargs', 'chmod', 'sleep', 'timeout', 'python3',
+                     'mktemp'):
             executable = shutil.which(name)
             if executable:
                 (binary / name).symlink_to(executable)
@@ -170,15 +192,25 @@ class FastStageTests(unittest.TestCase):
             tools=str(self.work / "tools"),
             domain="example.test",
             DOMAIN_MATCH_REGEX=r"(^|\.)example\.test$",
+            resolvers=str(self.work / "resolvers.txt"),
             resolvers_trusted=str(self.work / "resolvers.txt"),
             subs_wordlist=str(self.words),
             subs_wordlist_big=str(self.big_words),
+            TIMEOUT_USED=str(self.work / "timeout-used.txt"),
+            DNSX_WORDLIST_USED=str(self.work / "dnsx-wordlist-used.txt"),
+            NOERROR_FIXTURE="",
+            NOERROR_EXIT="0",
+            DNSX_EXIT="0",
+            PERMUTATIONS_MAX_CANDIDATES="1000000",
+            PERMUTATIONS_LIMIT="1048576",
+            RECURSIVE_BRUTE_USE_BIG="false",
             outOfScope_file="",
             ONLY_METHODS="",
             DEEP="false",
             DIFF="false",
             DRY_RUN="false",
             INSCOPE="false",
+            SUBNOERROR="true",
             SUBBRUTE="true",
             SUBPERMUTE="true",
             SUBREGEXPERMUTE="true",
@@ -319,19 +351,87 @@ class FastStageTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(self.event_lines(), [])
 
-    def test_deep_recursive_brute_uses_big_list_and_bypasses_count_limit(self):
+    def test_deep_recursive_brute_uses_normal_wordlist_by_default(self):
         result = self.run_recursive(DEEP='true', DEEP_LIMIT='0')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.wordlist_used.read_text().strip(), str(self.words))
+        self.assertIn('brute', self.event_lines())
+
+    def test_deep_recursive_brute_can_opt_into_big_list(self):
+        result = self.run_recursive(DEEP='true', DEEP_LIMIT='0', RECURSIVE_BRUTE_USE_BIG='true')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(self.wordlist_used.read_text().strip(), str(self.big_words))
         self.assertIn('brute', self.event_lines())
 
     def test_deep_recursive_missing_big_list_fails_without_fallback(self):
         self.big_words.unlink()
-        result = self.run_recursive(DEEP='true', DEEP_LIMIT='0')
+        result = self.run_recursive(DEEP='true', DEEP_LIMIT='0', RECURSIVE_BRUTE_USE_BIG='true')
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(self.event_lines(), [])
         self.assertEqual(self.input.read_text(), 'seed.example.test\n')
         self.assertFalse(self.checkpoint('sub_recursive_brute').exists())
+
+    def run_noerror(self, **settings):
+        return self.run_stage('sub_noerror', **settings)
+
+    def test_deep_noerror_uses_normal_wordlist_and_hard_timeout(self):
+        result = self.run_noerror(DEEP='true', DNSX_FIXTURE='probe.invalid [NXDOMAIN]\n',
+                                  NOERROR_FIXTURE='n1.example.test\n')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((self.work / 'dnsx-wordlist-used.txt').read_text().strip(), str(self.words))
+        self.assertEqual((self.work / 'timeout-used.txt').read_text().strip(), '15m')
+        self.assertEqual(self.input.read_text().splitlines(), ['seed.example.test', 'n1.example.test'])
+        self.assertEqual(self.status('sub_noerror'), 'OK')
+        self.assertTrue(self.checkpoint('sub_noerror').exists())
+
+    def test_noerror_timeout_is_configurable_and_retryable(self):
+        result = self.run_noerror(DEEP='true', DNS_NOERROR_TIMEOUT='2m',
+                                  DNSX_FIXTURE='probe.invalid [NXDOMAIN]\n',
+                                  NOERROR_FIXTURE='n1.example.test\n', NOERROR_EXIT='124')
+        self.assertEqual(result.returncode, 124, result.stdout + result.stderr)
+        self.assertEqual((self.work / 'timeout-used.txt').read_text().strip(), '2m')
+        self.assertIn('n1.example.test', self.input.read_text())
+        self.assertEqual(self.status('sub_noerror'), 'FAIL')
+        self.assertFalse(self.checkpoint('sub_noerror').exists())
+
+    def test_noerror_missing_wordlist_is_skipped_without_running_dnsx(self):
+        self.words.write_text("")
+        result = self.run_noerror(DEEP='true', DNSX_FIXTURE='probe.invalid [NXDOMAIN]\n')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.status('sub_noerror'), 'SKIP')
+        self.assertFalse((self.work / 'dnsx-wordlist-used.txt').exists())
+
+    def test_permutation_candidates_are_capped(self):
+        source = self.work / "perm-src.txt"
+        source.write_text("seed.example.test\n")
+        output = self.work / "perm-out.txt"
+        extra = (
+            'source "$REPO_ROOT/modules/subdomains.sh"\n'
+            '_run_permutation_engine() { local i; for ((i = 1; i <= 40; i++)); do '
+            'printf "c%s.example.test\\n" "$i"; done; }\n'
+            'generate() { _generate_permutation_candidates "$PERM_SRC" "$PERM_OUT"; }\n'
+        )
+        result = self.run_stage("generate", extra=extra, PERM_SRC=str(source),
+                                PERM_OUT=str(output), PERMUTATIONS_MAX_CANDIDATES="5")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(len(output.read_text().splitlines()), 5)
+        self.assertIn("capped at 5", result.stdout)
+
+    def test_permutation_candidate_count_can_be_unlimited(self):
+        source = self.work / "perm-src.txt"
+        source.write_text("seed.example.test\n")
+        output = self.work / "perm-out.txt"
+        extra = (
+            'source "$REPO_ROOT/modules/subdomains.sh"\n'
+            '_run_permutation_engine() { local i; for ((i = 1; i <= 40; i++)); do '
+            'printf "c%s.example.test\\n" "$i"; done; }\n'
+            'generate() { _generate_permutation_candidates "$PERM_SRC" "$PERM_OUT"; }\n'
+        )
+        result = self.run_stage("generate", extra=extra, PERM_SRC=str(source),
+                                PERM_OUT=str(output), PERMUTATIONS_MAX_CANDIDATES="0")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(len(output.read_text().splitlines()), 40)
+        self.assertNotIn("capped", result.stdout)
 
     def test_empty_brute_result_clears_stale_candidates(self):
         self.raw.write_text("stale-raw.example.test\n")

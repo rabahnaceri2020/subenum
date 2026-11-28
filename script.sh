@@ -50,15 +50,25 @@ notify_file() { command -v notify >/dev/null 2>&1 && notify "$@"; }
 # Timestamped progress line
 log() { printf '[%s] %s\n' "$(date '+%H:%M:%S')" "$*"; }
 
-# Wait for PID, printing a heartbeat every HEARTBEAT_INTERVAL seconds
+# Wait for PID, printing a heartbeat every HEARTBEAT_INTERVAL seconds.
+# When a target is given, report the last enumeration stage from its log.
 wait_with_heartbeat() {
-    local pid="$1" label="$2" start="$3"
+    local pid="$1" label="$2" start="$3" domain="${4:-}"
     local next=$(( $(date +%s) + HEARTBEAT_INTERVAL ))
     while kill -0 "$pid" 2>/dev/null; do
         sleep 1
         kill -0 "$pid" 2>/dev/null || break
         if (( $(date +%s) >= next )); then
-            log "$label still running (elapsed $(( $(date +%s) - start ))s)"
+            local stage=""
+            if [[ -n "$domain" ]]; then
+                local target_log
+                target_log=$(ls -t "$RECON_DIR/$domain/.log/"*.txt 2>/dev/null | head -1 || true)
+                if [[ -n "$target_log" && -r "$target_log" ]]; then
+                    stage=$(grep -aE 'Start subfunction|End subfunction' "$target_log" 2>/dev/null | tail -1 | sed 's/^\[[^]]*\] //' || true)
+                fi
+            fi
+            [[ -n "$stage" ]] && stage=", current: ${stage}"
+            log "$label still running (elapsed $(( $(date +%s) - start ))s)${stage}"
             next=$(( $(date +%s) + HEARTBEAT_INTERVAL ))
         fi
     done
@@ -106,6 +116,17 @@ if [[ "$DEEP_MODE" == true ]]; then
     SUBENUM_CLI_OPTS=(--deep --only all --check-tools)
 fi
 
+# One pipeline at a time: concurrent runs halve each other's DNS throughput.
+LOCK_FILE="$BASE/.pipeline.lock"
+if command -v flock >/dev/null 2>&1; then
+    exec 9>"$LOCK_FILE" || { echo "ERROR: cannot open lock file: $LOCK_FILE" >&2; exit 1; }
+    if ! flock -n 9; then
+        echo "ERROR: another subenum pipeline run is already active (lock: $LOCK_FILE)." >&2
+        echo "Wait for it to finish, or stop the running wrapper first." >&2
+        exit 1
+    fi
+fi
+
 mkdir -p "$OUT_DIR" || { echo "ERROR: Cannot create output directory: $OUT_DIR" >&2; exit 1; }
 if [[ ! -f "$DOMAIN_LIST" ]]; then
     echo "ERROR: domain list not found: $DOMAIN_LIST (use -l <file>)" >&2
@@ -148,7 +169,7 @@ for domain in $(cat "$DOMAIN_LIST"); do
         echo "========================================"
     } >> "$LOG_FILE"
     ( set -o pipefail; bash "$SUBENUM_SCRIPT" -d "$domain" $SUBENUM_OPTS "${SUBENUM_CLI_OPTS[@]}" 2>&1 | tee -a "$LOG_FILE" ) &
-    if wait_with_heartbeat $! "subenum" "$start_time"; then
+    if wait_with_heartbeat $! "subenum" "$start_time" "$domain"; then
         :
     else
         enum_status=$?

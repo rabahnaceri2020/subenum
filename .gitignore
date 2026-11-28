@@ -10,3 +10,4 @@ logs/
 # Expanded wordlists (generated from the vendored .gz or downloaded)
 resources/wordlists/subdomains.txt
 resources/wordlists/subdomains_big.txt
+.pipeline.lock

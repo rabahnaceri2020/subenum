@@ -707,19 +707,41 @@ function sub_noerror() {
 
         if [[ $dns_response == "[NXDOMAIN]" ]]; then
 
-            if [[ $DEEP == true ]]; then
-                wordlist="$subs_wordlist_big"
-            else
-                wordlist="$subs_wordlist"
+            # NOERROR brute force complements sub_brute; it is not a second
+            # full brute-force pass. Even in --deep it uses the normal list and
+            # a hard timeout: repeating the huge wordlist here costs hours on
+            # large targets while adding very few subdomains.
+            local wordlist="$subs_wordlist"
+            if [[ ! -s "$wordlist" || ! -r "$wordlist" ]]; then
+                _print_msg WARN "NOERROR wordlist missing or unreadable: $wordlist; skipping."
+                end_subfunc "0 new subs (DNS noerror - missing wordlist)" "${FUNCNAME[0]}" "SKIP_NOINPUT"
+                return 0
             fi
 
-            run_command dnsx -d "$domain" -r "$resolvers" -silent \
-                -rcode noerror -w "$wordlist" \
-                2>>"$LOGFILE" | cut -d' ' -f1 | anew -q .tmp/subs_noerror.txt >/dev/null
+            local noerror_timeout="${DNS_NOERROR_TIMEOUT:-15m}"
+
+            if [[ "${DRY_RUN:-false}" == "true" ]]; then
+                _run_timed_command "$noerror_timeout" dnsx -d "$domain" -r "$resolvers" -silent \
+                    -rcode noerror -w "$wordlist" 2>>"$LOGFILE"
+                end_subfunc "DNS noerror (dry-run)" "${FUNCNAME[0]}"
+                return 0
+            fi
+
+            local noerror_rc=0 noerror_raw
+            noerror_raw=$(mktemp .tmp/subs_noerror.raw.XXXXXX) || {
+                end_subfunc "Failed to create NOERROR scratch file" "${FUNCNAME[0]}" "FAIL"
+                return 1
+            }
+            _run_timed_command "$noerror_timeout" dnsx -d "$domain" -r "$resolvers" -silent \
+                -rcode noerror -w "$wordlist" >"$noerror_raw" 2>>"$LOGFILE"
+            noerror_rc=$?
+
+            cut -d' ' -f1 "$noerror_raw" 2>/dev/null | anew -q .tmp/subs_noerror.txt >/dev/null || true
 
             if [[ $INSCOPE == true ]]; then
                 if ! check_inscope .tmp/subs_noerror.txt 2>>"$LOGFILE" >/dev/null; then
                     print_warnf "check_inscope command failed."
+                    rm -f -- "$noerror_raw"
                     return 1
                 fi
             fi
@@ -728,6 +750,18 @@ function sub_noerror() {
                 | grep -E '^([a-zA-Z0-9\.\-]+\.)+[a-zA-Z]{1,}$' \
                 | sed 's/^\*\.//' | anew subdomains/subdomains.txt | sed '/^$/d' | wc -l | tr -d ' ' || true)
             [[ "$NUMOFLINES" =~ ^[0-9]+$ ]] || NUMOFLINES=0
+
+            rm -f -- "$noerror_raw"
+
+            if (( noerror_rc == 124 )); then
+                _print_msg WARN "NOERROR check capped at ${noerror_timeout}; partial matches kept."
+                end_subfunc "${NUMOFLINES} new subs (DNS noerror, timeout)" "${FUNCNAME[0]}" "FAIL"
+                return 124
+            elif (( noerror_rc != 0 )); then
+                _print_msg WARN "NOERROR check failed (exit ${noerror_rc}); partial matches kept."
+                end_subfunc "${NUMOFLINES} new subs (DNS noerror, error)" "${FUNCNAME[0]}" "FAIL"
+                return "$noerror_rc"
+            fi
 
             end_subfunc "${NUMOFLINES} new subs (DNS noerror)" "${FUNCNAME[0]}"
 
@@ -1149,7 +1183,28 @@ _generate_permutation_candidates() {
     local output_file="$2"
     : >"$output_file"
     [[ -s "$source_file" ]] || return 0
-    _run_permutation_engine "$source_file" | sed '/^\s*$/d' | head -c "$PERMUTATIONS_LIMIT" >"$output_file"
+
+    # Bound the DNS work: resolving tens of millions of candidates costs hours
+    # for a handful of new subdomains. Cap the candidate count first, then the
+    # byte limit for callers that deliberately set an unlimited count.
+    local max_candidates="${PERMUTATIONS_MAX_CANDIDATES:-1000000}"
+    [[ "$max_candidates" =~ ^[0-9]+$ ]] || max_candidates=1000000
+
+    if (( max_candidates > 0 )); then
+        _run_permutation_engine "$source_file" | sed '/^\s*$/d' \
+            | head -n "$((max_candidates + 1))" >"$output_file"
+        local generated
+        generated=$(wc -l <"$output_file" 2>/dev/null | tr -d ' ')
+        [[ "$generated" =~ ^[0-9]+$ ]] || generated=0
+        if (( generated > max_candidates )); then
+            head -n "$max_candidates" "$output_file" >"${output_file}.capped"
+            cat "${output_file}.capped" >"$output_file"
+            rm -f -- "${output_file}.capped"
+            _print_msg WARN "Permutation candidates capped at ${max_candidates}; raise PERMUTATIONS_MAX_CANDIDATES for full coverage."
+        fi
+    else
+        _run_permutation_engine "$source_file" | sed '/^\s*$/d' | head -c "$PERMUTATIONS_LIMIT" >"$output_file"
+    fi
 }
 
 # Return 0 when the target is small enough for expensive permutations
@@ -1469,8 +1524,13 @@ function sub_recursive_brute() {
 
         subdomain_count=$(wc -l <subdomains/subdomains.txt)
         if [[ "${DEEP:-false}" == true ]] || [[ $subdomain_count -le $DEEP_LIMIT ]]; then
+            # Recursive brute runs once per top parent, so the huge wordlist
+            # here means millions of lookups per parent. Keep the fast list
+            # unless the user explicitly opts in.
             local wordlist="$subs_wordlist"
-            [[ "${DEEP:-false}" == true ]] && wordlist="$subs_wordlist_big"
+            if [[ "${DEEP:-false}" == true && "${RECURSIVE_BRUTE_USE_BIG:-false}" == true ]]; then
+                wordlist="$subs_wordlist_big"
+            fi
             if [[ ! -s "$wordlist" || ! -r "$wordlist" ]]; then
                 end_subfunc "Recursive brute-force wordlist missing or unreadable: ${wordlist}" "${FUNCNAME[0]}" "FAIL"
                 return 1
